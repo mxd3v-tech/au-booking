@@ -8,7 +8,7 @@
   * `uq_session_open` — открытым может быть только один сеанс. Индекс по
     выражению `(closed_at IS NULL)` с условием на то же выражение: у всех
     открытых сеансов ключ индекса одинаковый, поэтому второй не вставится.
-  * `uq_entry_active_person` — один человек не может стоять в очереди дважды.
+  * `uq_entry_person` — один человек может записаться на приём только один раз.
 """
 from __future__ import annotations
 
@@ -51,9 +51,6 @@ class EntryStatus(str, enum.Enum):
             "left": "Ушёл",
         }[self.value]
 
-
-#: Статусы, при которых человек ещё занимает место в очереди.
-ACTIVE_STATUSES = (EntryStatus.waiting,)
 
 _status_type = Enum(
     EntryStatus,
@@ -117,16 +114,14 @@ class QueueEntry(Base):
     __tablename__ = "queue_entry"
     __table_args__ = (
         UniqueConstraint("session_id", "number", name="uq_entry_number"),
-        # Повторно встать в ту же очередь нельзя — ни с другого телефона,
-        # ни почистив куки: ключ здесь «фамилия-имя + группа».
-        Index(
-            "uq_entry_active_person",
-            "session_id",
-            "full_name_key",
-            "group_name",
-            unique=True,
-            postgresql_where=text("status = 'waiting'"),
-        ),
+        # Одна запись на весь приём. Повторно не встать ни с другого телефона,
+        # ни почистив куки, ни после отметки «Принят» — вернуть человека в
+        # очередь может только преподаватель из админки.
+        #
+        # В ключе только ФИО: группу студент пишет сам, и «поправить» её,
+        # чтобы записаться второй раз, ничего не стоит. Настоящий однофамилец
+        # добавляется вручную из админки — его ключу дописывается группа.
+        UniqueConstraint("session_id", "full_name_key", name="uq_entry_person"),
         Index("ix_entry_name_key", "full_name_key"),
         Index("ix_entry_group", "group_name"),
     )

@@ -146,6 +146,34 @@ def waiting_before(entries: list[QueueEntry], entry: QueueEntry) -> int:
     return sum(1 for e in entries if e.is_waiting and e.number < entry.number)
 
 
+def _namesake_key(full_name_key: str, group_name: str, attempt: int) -> str:
+    """Ключ для настоящего однофамильца — его подтвердил преподаватель."""
+    suffix = f"|{group_name.lower()}" + (f"|{attempt}" if attempt > 1 else "")
+    return (full_name_key + suffix)[:160]
+
+
+def _already_joined_message(
+    db: Session, session_id: int, full_name_key: str, full_name: str
+) -> str:
+    """Отказ по делу: человек должен понять, что именно ему делать дальше."""
+    existing = db.scalar(
+        select(QueueEntry).where(
+            QueueEntry.session_id == session_id,
+            QueueEntry.full_name_key == full_name_key,
+        )
+    )
+    if existing is not None and existing.is_waiting:
+        return (
+            f"{full_name} уже стоит в этой очереди под №{existing.number}. "
+            "Дважды занимать место нечестно по отношению к тем, кто ждёт."
+        )
+    was = f" — №{existing.number}, {existing.status.label.lower()}" if existing else ""
+    return (
+        f"{full_name} уже записывался на этот приём{was}. Второй раз за один "
+        "приём встать нельзя — подойдите к преподавателю, он вернёт вас в очередь."
+    )
+
+
 def join_queue(
     db: Session,
     *,
@@ -158,16 +186,23 @@ def join_queue(
     token: str,
     ip_hash: str = "",
     added_by_admin: bool = False,
+    allow_namesake: bool = False,
 ) -> QueueEntry:
     """Встать в очередь. Номер выдаётся следующим по порядку.
 
-    Если два человека нажали кнопку в одну и ту же секунду, второму
-    достанется тот же номер — база это отклонит, и мы просто берём
-    следующий. Отсюда цикл, а не одна попытка.
+    Не пустить запись могут два ограничения базы, и ведём мы себя по-разному:
+
+      * `uq_entry_number` — двое нажали кнопку в одну и ту же секунду и
+        претендуют на один номер. Берём следующий и пробуем снова; отсюда
+        цикл, а не одна попытка.
+      * `uq_entry_person` — этот человек в приёме уже есть. Студенту отказ,
+        а подтверждённому в админке однофамильцу дописываем к ключу группу.
     """
     last_error: IntegrityError | None = None
+    key = full_name_key
+    namesakes = 0
 
-    for _ in range(5):
+    for _ in range(8):
         number = (
             db.scalar(
                 select(func.max(QueueEntry.number)).where(
@@ -181,7 +216,7 @@ def join_queue(
             session_id=session.id,
             number=number,
             full_name=full_name,
-            full_name_key=full_name_key,
+            full_name_key=key,
             group_name=group_name,
             purpose_id=purpose_id,
             comment=comment,
@@ -194,11 +229,13 @@ def join_queue(
             db.commit()
         except IntegrityError as exc:
             db.rollback()
-            if _violates(exc, "uq_entry_active_person"):
-                raise QueueError(
-                    f"{full_name} из группы {group_name} уже стоит в этой очереди. "
-                    "Дважды занимать место нечестно по отношению к тем, кто ждёт."
-                ) from exc
+            if _violates(exc, "uq_entry_person"):
+                if not allow_namesake:
+                    raise QueueError(
+                        _already_joined_message(db, session.id, key, full_name)
+                    ) from exc
+                namesakes += 1
+                key = _namesake_key(full_name_key, group_name, namesakes)
             last_error = exc
             continue
         db.refresh(entry)

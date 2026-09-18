@@ -118,16 +118,29 @@ c=$(join "$U3" "Сидоров Пётр" "КТ-24-04" "$PID_C" ""); [ "$c" = 422
 echo "== 8. Очередь набирается"
 c=$(join "$U1" "Иванов Иван" "КТ-24-04" "$PID" "лабораторная 4")
 [ "$c" = 303 ] && ok "первый студент записался" || no "запись вернула $c"
-n=$(sql "select number from queue_entry where full_name_key='иванов иван'")
+n=$(sql "select number from queue_entry where full_name='Иванов Иван'")
 [ "$n" = 1 ] && ok "выдан номер 1" || no "номер первого: $n"
 c=$(join "$U2" "Петрова Анна" "АИ-23-04")
-n=$(sql "select number from queue_entry where full_name_key='петрова анна'")
+n=$(sql "select number from queue_entry where full_name='Петрова Анна'")
 [ "$n" = 2 ] && ok "второму выдан номер 2" || no "номер второго: $n"
+
+# U3 — «другой телефон»: своей записи у него нет, куки чистые.
 c=$(join "$U3" "Иванов Иван" "КТ-24-04")
 [ "$c" = 422 ] && ok "повтор той же фамилии и группы отклонён" || no "дубль прошёл: $c"
+c=$(join "$U3" "иванов  иван" "КТ-24-04")
+[ "$c" = 422 ] && ok "регистр и лишние пробелы не помогают" || no "дубль через регистр: $c"
+c=$(join "$U3" "Иван Иванов" "КТ-24-04")
+[ "$c" = 422 ] && ok "переставленные имя и фамилия не помогают" || no "дубль через порядок слов: $c"
+c=$(join "$U3" "Иванов Иван" "КТ-24-09")
+[ "$c" = 422 ] && ok "другая группа не помогает" || no "дубль через группу: $c"
+c=$(join "$U3" "Иванов Иван Петрович" "КТ-24-04")
+[ "$c" = 422 ] && ok "дописанное отчество не помогает" || no "дубль через отчество: $c"
+
+# Ключ берём из базы, а не зашиваем: тест проверяет ограничение, а не формат.
+K=$(sql "select full_name_key from queue_entry where full_name='Иванов Иван'")
 r=$(sql "insert into queue_entry (session_id, number, full_name, full_name_key, group_name, comment, status, token, added_by_admin, ip_hash)
-         values ($SID, 99, 'Иванов Иван', 'иванов иван', 'КТ-24-04', '', 'waiting', 'dubl-test', false, '')" 2>&1)
-echo "$r" | grep -q "uq_entry_active_person" && ok "дубль отклонён базой, а не только формой" || no "база пустила дубль: $r"
+         values ($SID, 99, 'Иванов Иван', '$K', 'КТ-24-04', '', 'done', 'dubl-test', false, '')" 2>&1)
+echo "$r" | grep -q "uq_entry_person" && ok "дубль отклонён базой, а не только формой" || no "база пустила дубль: $r"
 
 echo "== 9. Имена видны всем"
 curl -s "$BASE/" > "$S"
@@ -146,26 +159,38 @@ echo "$r" | grep -q '"mine": *2' && ok "api знает мой номер" || no 
 
 echo "== 11. Выход из очереди"
 c=$(code -b "$U2" -X POST "$BASE/leave"); [ "$c" = 303 ] && ok "выход принят" || no "выход вернул $c"
-st=$(sql "select status from queue_entry where full_name_key='петрова анна'")
+st=$(sql "select status from queue_entry where full_name='Петрова Анна'")
 [ "$st" = "left" ] && ok "статус «ушёл» проставлен" || no "статус после выхода: $st"
 n=$(sql "select count(*) from queue_entry where session_id=$SID and status='waiting'")
 [ "$n" = 1 ] && ok "в очереди остался один" || no "ожидающих: $n"
 
 echo "== 12. Отметки преподавателя"
-EID=$(sql "select id from queue_entry where full_name_key='иванов иван'")
+EID=$(sql "select id from queue_entry where full_name='Иванов Иван'")
 c=$(code -b "$A" -X POST "$BASE/admin/entries/$EID/status" -d "status=done" -d "back=/admin")
 [ "$c" = 303 ] && ok "отметка «принят» принята" || no "отметка вернула $c"
 st=$(sql "select status from queue_entry where id=$EID")
 [ "$st" = "done" ] && ok "статус в базе — принят" || no "статус: $st"
 curl -s -b "$U1" "$BASE/" | grep -q "приём состоялся" && ok "студент видит, что его приняли" || no "студенту не видно отметки"
+c=$(join "$U3" "Иванов Иван" "КТ-24-04")
+[ "$c" = 422 ] && ok "после «принят» второй раз не записаться" || no "повтор после приёма прошёл: $c"
 
 echo "== 13. Запись вручную"
 c=$(code -b "$A" -X POST "$BASE/admin/entries" \
   --data-urlencode "full_name=Кузнецов Олег" --data-urlencode "group_name=КС-23-04" \
   --data-urlencode "purpose_id=$PID")
 [ "$c" = 303 ] && ok "ручная запись создана" || no "ручная запись: $c"
-n=$(sql "select number from queue_entry where full_name_key='кузнецов олег'")
+n=$(sql "select number from queue_entry where full_name='Кузнецов Олег'")
 [ "$n" = 3 ] && ok "ей достался номер 3" || no "номер ручной записи: $n"
+c=$(code -b "$A" -X POST "$BASE/admin/entries" \
+  --data-urlencode "full_name=Иванов Иван" --data-urlencode "group_name=КС-23-04" \
+  --data-urlencode "purpose_id=$PID")
+n=$(sql "select count(*) from queue_entry where session_id=$SID and full_name='Иванов Иван'")
+[ "$n" = 1 ] && ok "вручную дубль тоже не завести" || no "админка завела дубль: записей $n"
+c=$(code -b "$A" -X POST "$BASE/admin/entries" \
+  --data-urlencode "full_name=Иванов Иван" --data-urlencode "group_name=КС-23-04" \
+  --data-urlencode "purpose_id=$PID" --data-urlencode "namesake=on")
+n=$(sql "select number from queue_entry where full_name='Иванов Иван' and group_name='КС-23-04'")
+[ "$n" = 4 ] && ok "однофамилец по галочке прошёл, номер 4" || no "однофамилец не прошёл: $n"
 
 echo "== 14. Выгрузки и печать"
 curl -s -b "$A" "$BASE/admin/sessions/$SID/export.xlsx" -o "$S"
@@ -204,7 +229,7 @@ curl -s -b "$A" --get --data-urlencode "q=Иванов" "$BASE/admin/entries" | 
 curl -s -b "$A" --get --data-urlencode "group=АИ-23-04" "$BASE/admin/entries" | grep -q "Петрова Анна" \
   && ok "фильтр по группе работает" || no "фильтр по группе не сработал"
 n=$(sql "select count(*) from queue_entry where session_id=$SID")
-[ "$n" = 3 ] && ok "все три записи на месте" || no "записей в истории: $n"
+[ "$n" = 4 ] && ok "все четыре записи на месте" || no "записей в истории: $n"
 
 echo
 echo "Итог: $pass ок, $fail провалов"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from urllib.parse import quote, urlsplit
 
 import segno
@@ -47,17 +48,35 @@ def _back(url: str, ok: str = "", err: str = "") -> RedirectResponse:
     return RedirectResponse(url + suffix, status_code=303)
 
 
-def _parse_time(raw: str) -> dt.time | None:
-    try:
-        return dt.time.fromisoformat((raw or "").strip())
-    except ValueError:
-        return None
+#: Только 24-часовая запись: «09:00», «14:30», «23:59». Ни «2:30 PM», ни «25:00».
+_TIME_RE = re.compile(r"^([01]?[0-9]|2[0-3]):([0-5][0-9])$")
+
+TIME_FORMAT_ERROR = "Время пишем в 24-часовом формате: 09:00, 14:30, 18:00."
 
 
-def _check_window(time_from: dt.time | None, time_to: dt.time | None) -> str:
-    if time_from and time_to and time_to <= time_from:
-        return "Конец приёма должен быть позже начала."
-    return ""
+def _parse_window(
+    time_from: str, time_to: str
+) -> tuple[dt.time | None, dt.time | None, str]:
+    """Границы приёма из формы: начало, конец и текст ошибки.
+
+    Пустое поле — это «не указано», а вот непонятное время раньше молча
+    превращалось в пустое, и приём открывался без часов вовсе.
+    """
+    bounds: list[dt.time | None] = []
+    for raw in (time_from, time_to):
+        raw = (raw or "").strip()
+        if not raw:
+            bounds.append(None)
+            continue
+        match = _TIME_RE.match(raw)
+        if match is None:
+            return None, None, TIME_FORMAT_ERROR
+        bounds.append(dt.time(int(match.group(1)), int(match.group(2))))
+
+    start, end = bounds
+    if start and end and end <= start:
+        return None, None, "Конец приёма должен быть позже начала."
+    return start, end, ""
 
 
 def _active_purposes(db: Session) -> list[Purpose]:
@@ -161,8 +180,8 @@ def session_open(
     time_to: str = Form(""),
     note: str = Form(""),
 ):
-    start, end = _parse_time(time_from), _parse_time(time_to)
-    if error := _check_window(start, end):
+    start, end, error = _parse_window(time_from, time_to)
+    if error:
         return _back("/admin", err=error)
     try:
         queue_service.open_session(
@@ -189,8 +208,8 @@ def session_update(
     if session is None:
         return _back("/admin", err="Приём не открыт.")
 
-    start, end = _parse_time(time_from), _parse_time(time_to)
-    if error := _check_window(start, end):
+    start, end, error = _parse_window(time_from, time_to)
+    if error:
         return _back("/admin", err=error)
 
     session.room = room.strip()[:64]
@@ -222,8 +241,13 @@ def entry_add(
     group_name: str = Form(""),
     purpose_id: str = Form(""),
     comment: str = Form(""),
+    namesake: str = Form(""),
 ):
-    """Поставить в очередь руками — для тех, кто пришёл без телефона."""
+    """Поставить в очередь руками — для тех, кто пришёл без телефона.
+
+    Галочка «однофамилец» — единственный способ завести в приёме второе
+    такое же ФИО: решает живой человек, который видит очередь целиком.
+    """
     session = queue_service.current_session(db)
     if session is None:
         return _back("/admin", err="Приём не открыт — вставать некуда.")
@@ -247,6 +271,7 @@ def entry_add(
             comment=(comment or "").strip()[:200],
             token=new_entry_token(),
             added_by_admin=True,
+            allow_namesake=namesake == "on",
         )
     except queue_service.QueueError as exc:
         return _back("/admin", err=str(exc))

@@ -157,8 +157,9 @@ def join_submit(
     if session is None:
         return RedirectResponse("/", status_code=303)
 
-    mine = _my_entry(request, db, session.id)
-    if mine is not None and mine.is_waiting:
+    # Записаться можно один раз за приём — неважно, ждёт человек или его уже
+    # приняли. Форму с этого телефона показывать больше нечего.
+    if _my_entry(request, db, session.id) is not None:
         return RedirectResponse("/#my", status_code=303)
 
     name = clean_full_name(full_name)

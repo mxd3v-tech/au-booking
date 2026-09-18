@@ -22,6 +22,7 @@ _serializer = URLSafeTimedSerializer(settings.secret_key, salt="au-queue")
 
 _SPACES = re.compile(r"\s+")
 _NAME_ALLOWED = re.compile(r"^[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\-' ]{2,159}$")
+_NAME_PARTS = re.compile(r"[-'\s]+")
 _GROUP_RE = re.compile(settings.group_pattern)
 
 
@@ -108,16 +109,25 @@ def clean_full_name(raw: str) -> str:
 
 
 def name_key(raw: str) -> str:
-    """Ключ для сравнения ФИО: регистр, лишние пробелы и ё не должны мешать."""
-    return _SPACES.sub(" ", (raw or "").strip().lower()).replace("ё", "е")
+    """Ключ, по которому человек считается тем же самым.
+
+    Сравниваем не буквы, а человека. Мимо уникального индекса пролезала любая
+    мелочь в написании, поэтому здесь снимается всё, что человека не меняет:
+    регистр, лишние пробелы, ё, дефис в двойной фамилии — и порядок слов,
+    иначе «Иванов Иван» и «Иван Иванов» дают два разных ключа.
+    """
+    parts = _NAME_PARTS.split((raw or "").strip().lower().replace("ё", "е"))
+    return " ".join(sorted(part for part in parts if part))
 
 
 def validate_full_name(name: str) -> str | None:
     parts = [p for p in name.split(" ") if p]
     if len(parts) < 2:
         return "Нужны фамилия и имя. Отчество писать не надо."
-    if len(parts) > 3:
-        return "Слишком много слов — достаточно фамилии и имени."
+    # Ровно два слова — не придирка к оформлению: пока отчество было
+    # необязательным, его дописывали, чтобы встать в очередь второй раз.
+    if len(parts) > 2:
+        return "Только фамилия и имя — отчество писать не надо."
     if any(len(part) < 2 for part in parts):
         return "Имя и фамилию пишем целиком, не инициалами."
     if not _NAME_ALLOWED.match(name):
