@@ -253,7 +253,40 @@ grep -q "<svg" "$S" && ok "qr отрисован в svg" || no "нет svg с к
 grep -q "/q" "$S" && ok "код ведёт на /q" || no "в коде нет адреса /q"
 c=$(code "$BASE/q"); [ "$c" = 307 ] && ok "/q ведёт на очередь" || no "/q вернул $c"
 
-echo "== 16. Закрытие приёма"
+echo "== 16. Заявленное время вышло"
+# Двигаем окно приёма в прошлое. Время «до» — местное, поэтому переводим
+# now() в тот же пояс, в котором живёт приложение.
+tz_time(){ echo "((now() $1) at time zone 'Europe/Moscow')::time"; }
+w=$(sql "select count(*) from queue_entry where session_id=$SID and status='waiting'")
+[ "$w" -ge 1 ] && ok "в очереди ещё ждут ($w) — есть кого дообслуживать" || no "ждущих нет, сценарий не проверить"
+sql "update queue_session set opened_at = now() - interval '2 hours',
+     time_from = $(tz_time "- interval '2 hours'"), time_to = $(tz_time "- interval '1 hour'")
+     where id=$SID" > /dev/null
+
+c=$(code "$BASE/join"); [ "$c" = 303 ] && ok "новых на форму записи не пускают" || no "/join после времени: $c"
+curl -s "$BASE/" > "$S"
+grep -q "Запись закрыта" "$S" && ok "студенту видно, что запись закрыта" || no "на странице нет объяснения"
+grep -q "Встать в очередь" "$S" && no "кнопка записи всё ещё на месте" || ok "кнопки записи больше нет"
+n=$(sql "select count(*) from queue_session where id=$SID and closed_at is null")
+[ "$n" = 1 ] && ok "приём не закрылся: очередь дообслуживают" || no "приём закрылся, хотя ещё ждут"
+n=$(sql "select count(*) from queue_entry where session_id=$SID and status='waiting'")
+[ "$n" = "$w" ] && ok "номерки ждущих на месте" || no "ждущих стало $n вместо $w"
+
+# Прямой POST по форме, открытой до конца приёма, тоже не проходит.
+before=$(sql "select count(*) from queue_entry where session_id=$SID")
+cid=$(curl -s "$BASE/api/captcha" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -o /dev/null -X POST "$BASE/api/captcha/$cid" --data-urlencode "answer=$(solve "$cid")"
+code -b "$U2" -c "$U2" -X POST "$BASE/join" --data-urlencode "full_name=Опоздавший Пётр" \
+  --data-urlencode "group_name=КТ-24-04" --data-urlencode "purpose_id=$PID" \
+  --data-urlencode "captcha_id=$cid" --data-urlencode "session_id=$SID" > /dev/null
+n=$(sql "select count(*) from queue_entry where session_id=$SID")
+[ "$n" = "$before" ] && ok "опоздавший не записался в обход формы" || no "записей стало $n вместо $before"
+
+# Преподаватель продлевает время — запись снова открыта.
+sql "update queue_session set time_to = $(tz_time "+ interval '2 hours'") where id=$SID" > /dev/null
+c=$(code "$BASE/join"); [ "$c" = 200 ] && ok "после продления запись снова открыта" || no "/join после продления: $c"
+
+echo "== 17. Закрытие приёма"
 c=$(code -b "$A" -X POST "$BASE/admin/session/close")
 [ "$c" = 303 ] && ok "приём закрыт" || no "закрытие вернуло $c"
 n=$(sql "select count(*) from queue_session where closed_at is null")
@@ -261,7 +294,7 @@ n=$(sql "select count(*) from queue_session where closed_at is null")
 curl -s "$BASE/" | grep -q "Сейчас приёма нет" && ok "студент снова видит «приёма нет»" || no "страница не обновилась"
 c=$(code "$BASE/join"); [ "$c" = 303 ] && ok "после закрытия встать нельзя" || no "/join после закрытия: $c"
 
-echo "== 17. История"
+echo "== 18. История"
 curl -s -b "$A" "$BASE/admin/sessions" | grep -q "1215" && ok "приём виден в истории" || no "истории нет"
 curl -s -b "$A" "$BASE/admin/sessions/$SID" | grep -q "Иванов Иван" && ok "список приёма сохранился" || no "список потерян"
 curl -s -b "$A" --get --data-urlencode "q=Иванов" "$BASE/admin/entries" | grep -q "Иванов Иван" \
@@ -271,7 +304,7 @@ curl -s -b "$A" --get --data-urlencode "group=АИ-23-04" "$BASE/admin/entries" 
 n=$(sql "select count(*) from queue_entry where session_id=$SID")
 [ "$n" = 4 ] && ok "все четыре записи на месте" || no "записей в истории: $n"
 
-echo "== 18. Регрессионные проверки"
+echo "== 19. Регрессионные проверки"
 "${compose[@]}" exec -T app python -m unittest discover -s /tests -v \
   && ok "серверные регрессионные проверки" || no "серверные регрессионные проверки"
 node --test "$CD/tests/ui.test.cjs" \

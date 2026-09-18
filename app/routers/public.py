@@ -67,6 +67,8 @@ def _queue_context(request: Request, db: Session) -> dict:
     return {
         "session": session,
         "session_revision": queue_service.session_revision(session),
+        # Заявленное время вышло: новые уже не встают, очередь дообслуживают.
+        "join_closed": queue_service.joining_closed(session),
         "entries": entries,
         "mine": mine,
         "ahead": queue_service.waiting_before(entries, mine) if mine else 0,
@@ -141,6 +143,9 @@ def join_form(request: Request, db: Session = Depends(get_db)):
     session = queue_service.current_session(db)
     if session is None:
         return RedirectResponse("/", status_code=303)
+    # Время вышло — форму не показываем: на странице очереди объяснено, почему.
+    if queue_service.joining_closed(session):
+        return RedirectResponse("/", status_code=303)
     if _my_entry(request, db, session.id) is not None:
         return RedirectResponse("/#my", status_code=303)
     return _join_form(request, db, session)
@@ -159,6 +164,11 @@ def join_submit(
 ):
     session = queue_service.current_session(db)
     if session is None:
+        return RedirectResponse("/", status_code=303)
+
+    # Форма могла быть открыта до конца приёма — проверяем время на сервере,
+    # иначе запись прошла бы по уже закрытой форме.
+    if queue_service.joining_closed(session):
         return RedirectResponse("/", status_code=303)
 
     if session_id != str(session.id):

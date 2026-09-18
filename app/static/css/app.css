@@ -222,6 +222,9 @@ img,svg{max-width:100%}
   border:1px solid var(--rule);background:var(--surface-2);margin-bottom:var(--space-5);
 }
 .status-bar--open{border-color:var(--brand);background:var(--brand-soft)}
+/* время вышло: приём ещё идёт, но новых номерков не выдают */
+.status-bar--ending{border-color:var(--accent);background:var(--accent-soft)}
+.status-bar--ending .status-bar__dot{background:var(--accent)}
 .status-bar__dot{width:10px;height:10px;border-radius:50%;background:var(--muted-soft);flex-shrink:0}
 .status-bar--open .status-bar__dot{background:var(--brand);animation:live 2.4s ease-out infinite}
 .status-bar__text{font-weight:700;color:var(--ink-strong)}

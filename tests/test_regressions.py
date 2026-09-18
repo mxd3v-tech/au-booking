@@ -77,6 +77,23 @@ class RegressionTests(unittest.TestCase):
         with SessionLocal() as db:
             return queue.close_session(db, db.get(QueueSession, session.id))
 
+    def set_window(self, session, *, opened_hours_ago=2, ends_in_minutes=-60):
+        """Сдвинуть приём в прошлое: и открытие, и заявленное «до».
+
+        Двигаем именно пару, а не одно «до»: иначе около полуночи приём
+        оказался бы «через полночь» и время бы ещё не вышло.
+        """
+        now = queue.now_local()
+        opened = now - dt.timedelta(hours=opened_hours_ago)
+        ends = now + dt.timedelta(minutes=ends_in_minutes)
+        with SessionLocal() as db:
+            stored = db.get(QueueSession, session.id)
+            stored.opened_at = opened.astimezone(dt.timezone.utc)
+            stored.time_from = opened.time()
+            stored.time_to = ends.time()
+            db.commit()
+            self.assertTrue(queue.joining_closed(stored) == (ends_in_minutes < 0))
+
     def captcha(self, solved=True):
         with SessionLocal() as db:
             challenge = issue_challenge(db, "quiz")
@@ -413,6 +430,107 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('data-group-input=""', page)
         self.assertIn("КСП-24-04", page)
         self.assertNotIn("две буквы", page)
+
+    # ── Конец приёма по часам ──────────────────────────────────────────
+
+    def test_session_end_follows_the_day_it_opened(self):
+        session = self.open()
+        with SessionLocal() as db:
+            stored = db.get(QueueSession, session.id)
+            opened = queue.now_local().replace(hour=22, minute=0, second=0, microsecond=0)
+            stored.opened_at = opened.astimezone(dt.timezone.utc)
+
+            stored.time_to = dt.time(23, 0)
+            db.commit()
+            ends_at = queue.session_ends_at(stored)
+            self.assertEqual(ends_at, opened + dt.timedelta(hours=1))
+            self.assertFalse(queue.joining_closed(stored, now=ends_at - dt.timedelta(minutes=1)))
+            self.assertTrue(queue.joining_closed(stored, now=ends_at))
+
+            # Приём через полночь: «до» раньше открытия — значит, конец завтра.
+            stored.time_to = dt.time(0, 30)
+            db.commit()
+            self.assertEqual(
+                queue.session_ends_at(stored),
+                (opened + dt.timedelta(days=1)).replace(hour=0, minute=30),
+            )
+
+            # Без «до» приём по часам не заканчивается вовсе.
+            stored.time_to = None
+            db.commit()
+            self.assertIsNone(queue.session_ends_at(stored))
+            self.assertFalse(queue.joining_closed(stored))
+
+    def test_expired_window_closes_joining_but_keeps_the_queue(self):
+        session = self.open()
+        with SessionLocal() as db:
+            waiting = self.add(db, session)
+            db.commit()
+            number = waiting.number
+        self.set_window(session)
+
+        # Очередь жива: ждущий на месте, приём не ушёл в историю.
+        with SessionLocal() as db:
+            self.assertIsNotNone(queue.current_session(db))
+        code, headers, _ = http("/join")
+        self.assertEqual(code, 303)
+        self.assertEqual(headers["Location"], "/")
+
+        code, _, body = http("/")
+        self.assertEqual(code, 200)
+        self.assertIn("Запись закрыта", body.decode())
+        self.assertIn(f">{number}<".encode(), body)
+
+        # И прямой POST по открытой заранее форме тоже не проходит.
+        code, headers, _ = http("/join", self.form(session, self.captcha(), "Опоздавший Пётр"))
+        self.assertEqual(code, 303)
+        self.assertEqual(headers["Location"], "/")
+        self.assertEqual(self.count(session), 1)
+
+    def test_session_closes_itself_once_the_last_person_is_served(self):
+        session = self.open()
+        with SessionLocal() as db:
+            entry = self.add(db, session)
+            db.commit()
+            entry_id = entry.id
+        self.set_window(session)
+
+        with SessionLocal() as db:
+            self.assertIsNotNone(queue.current_session(db), "с ждущим приём остаётся открытым")
+            queue.set_status(db, db.get(QueueEntry, entry_id), EntryStatus.done)
+        with SessionLocal() as db:
+            self.assertIsNone(queue.current_session(db), "очередь опустела — приём закрылся сам")
+            closed = db.get(QueueSession, session.id)
+            self.assertIsNotNone(closed.closed_at)
+            # Запись осталась в истории со своим статусом.
+            self.assertEqual(db.get(QueueEntry, entry_id).status, EntryStatus.done)
+
+    def test_open_session_without_end_time_never_closes_itself(self):
+        session = self.open()
+        with SessionLocal() as db:
+            self.assertIsNone(db.get(QueueSession, session.id).time_to)
+            self.assertIsNotNone(queue.current_session(db))
+            self.assertIsNone(db.get(QueueSession, session.id).closed_at)
+
+    def test_teacher_can_extend_the_window_instead_of_losing_the_session(self):
+        session = self.open()
+        with SessionLocal() as db:
+            self.add(db, session)
+            db.commit()
+        self.set_window(session)
+
+        later = (queue.now_local() + dt.timedelta(hours=1)).strftime("%H:%M")
+        code, _, _ = http(
+            "/admin/session/update",
+            {"room": "1215", "time_from": "", "time_to": later, "note": ""},
+            cookie=self.admin,
+        )
+        self.assertEqual(code, 303)
+        with SessionLocal() as db:
+            reopened = queue.current_session(db)
+            self.assertIsNotNone(reopened)
+            self.assertFalse(queue.joining_closed(reopened), "запись снова открыта")
+        self.assertEqual(http("/join")[0], 200)
 
     def test_static_is_revalidated_after_a_rebuild(self):
         code, headers, _ = http("/static/js/app.js")

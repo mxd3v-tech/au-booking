@@ -167,6 +167,8 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "default_room": settings.default_room,
             "default_from": f"{start:%H:%M}",
             "default_to": f"{start + dt.timedelta(hours=2):%H:%M}",
+            # Время вышло: запись закрыта, но приём держится, пока есть ждущие.
+            "join_closed": queue_service.joining_closed(session),
             "ok": request.query_params.get("ok", ""),
             "err": request.query_params.get("err", ""),
         },
@@ -205,7 +207,9 @@ def session_update(
     time_to: str = Form(""),
     note: str = Form(""),
 ):
-    session = queue_service.current_session(db)
+    # Без автозакрытия: продление времени не должно споткнуться о приём,
+    # который закрылся бы ровно в этот момент.
+    session = queue_service.current_session(db, autoclose=False)
     if session is None:
         return _back("/admin", err="Приём не открыт.")
 
@@ -213,11 +217,15 @@ def session_update(
     if error:
         return _back("/admin", err=error)
 
+    was_closed = queue_service.joining_closed(session)
     session.room = room.strip()[:64]
     session.time_from = start
     session.time_to = end
     session.note = note.strip()
     db.commit()
+
+    if was_closed and not queue_service.joining_closed(session):
+        return _back("/admin", ok="Сохранено. Время продлено, запись снова открыта.")
     return _back("/admin", ok="Сохранено.")
 
 

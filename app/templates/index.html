@@ -17,13 +17,20 @@
 
 {% block content %}
 
-<div class="status-bar{% if session %} status-bar--open{% endif %}" data-queue-status
+<div class="status-bar{% if session and join_closed %} status-bar--ending{% elif session %} status-bar--open{% endif %}"
+     data-queue-status
      data-session-id="{{ session.id if session else '' }}"
      data-session-revision="{{ session_revision }}"
      data-mine-status="{{ mine.status.value if mine else '' }}"
      data-poll="{{ settings.poll_seconds }}">
   <span class="status-bar__dot" aria-hidden="true"></span>
-  {% if session %}
+  {% if session and join_closed %}
+  <span class="status-bar__text">Запись закрыта</span>
+  <span class="status-bar__meta">
+    {%- if session.room %}каб. {{ session.room }} · {% endif -%}
+    {{ session.time_label }} · принимают тех, кто успел
+  </span>
+  {% elif session %}
   <span class="status-bar__text">Приём идёт</span>
   <span class="status-bar__meta">
     {%- if session.room %}каб. {{ session.room }} · {% endif -%}
@@ -83,6 +90,15 @@
   {% endif %}
 </section>
 
+{% elif join_closed %}
+<div class="callout callout--warn">
+  <div class="callout__title">Запись на этот приём закрыта</div>
+  <p style="margin:0;font-size:var(--text-14)">
+    Заявленное время — {{ session.time_label }} — вышло, новые номерки не выдаются.
+    Кто успел встать, того ещё принимают: список ниже живой.
+    Следующий приём появится здесь сам, обновлять страницу не нужно.
+  </p>
+</div>
 {% else %}
 <a class="btn btn--primary btn--lg btn--block" href="/join">Встать в очередь</a>
 <p class="field__hint" style="margin-top:var(--space-3);text-align:center">

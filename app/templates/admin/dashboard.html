@@ -5,9 +5,9 @@
 
 {% if session %}
 
-<div class="status-bar status-bar--open">
+<div class="status-bar {{ 'status-bar--ending' if join_closed else 'status-bar--open' }}">
   <span class="status-bar__dot" aria-hidden="true"></span>
-  <span class="status-bar__text">Приём идёт</span>
+  <span class="status-bar__text">{{ 'Время вышло' if join_closed else 'Приём идёт' }}</span>
   <span class="status-bar__meta">
     {%- if session.room %}каб. {{ session.room }} · {% endif -%}
     {%- if session.time_label %}{{ session.time_label }} · {% endif -%}
@@ -18,6 +18,20 @@
     <button type="submit" class="btn btn--danger btn--sm">Закрыть приём</button>
   </form>
 </div>
+
+{% if join_closed %}
+<div class="callout callout--warn">
+  <div class="callout__title">
+    Запись закрыта — заявленное время ({{ session.time_label }}) вышло
+  </div>
+  <p style="margin:0;font-size:var(--text-14)">
+    Новые студенты встать уже не могут. В очереди ещё {{ counters.waiting | people }} —
+    доотмечайте как обычно: когда последний будет отмечен, приём закроется сам
+    и уйдёт в историю. Нужно ещё поработать — поставьте время «до» побольше
+    в параметрах приёма ниже, и запись снова откроется.
+  </p>
+</div>
+{% endif %}
 
 <div class="stat-row">
   <div class="stat"><div class="stat__value">{{ counters.waiting }}</div><div class="stat__label">ждут</div></div>
