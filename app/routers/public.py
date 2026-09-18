@@ -1,31 +1,29 @@
-"""Студенческая часть: расписание, бронь, талон, капча."""
+"""Студенческая часть: очередь, постановка в неё, капча."""
 from __future__ import annotations
-
-import datetime as dt
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from app.captcha import consume_challenge, issue_challenge, verify_challenge
 from app.config import settings
 from app.db import get_db
-from app.models import Booking, BookingStatus, Purpose, Slot
+from app.models import EntryStatus, Purpose, QueueEntry
 from app.security import (
-    BOOKINGS_COOKIE,
-    BOOKINGS_COOKIE_MAX_AGE,
+    ENTRY_COOKIE,
+    ENTRY_COOKIE_MAX_AGE,
     clean_full_name,
     clean_group,
     hash_ip,
     name_key,
-    new_cancel_token,
-    read_remembered,
+    new_entry_token,
+    read_entry_token,
     validate_full_name,
     validate_group,
-    write_remembered,
+    write_entry_token,
 )
-from app.services import slots as slot_service
+from app.services import queue as queue_service
 from app.templating import templates
 
 router = APIRouter()
@@ -41,36 +39,19 @@ def _active_purposes(db: Session) -> list[Purpose]:
     )
 
 
-def _my_bookings(request: Request, db: Session) -> list[Booking]:
-    tokens = read_remembered(request)
-    if not tokens:
-        return []
-    found = db.scalars(
-        select(Booking)
-        .options(
-            selectinload(Booking.slot).selectinload(Slot.day),
-            selectinload(Booking.purpose),
-        )
-        .where(Booking.cancel_token.in_(tokens))
-    ).all()
-    now = slot_service.now_local()
-    upcoming = [
-        b
-        for b in found
-        if b.status == BookingStatus.booked and slot_service.to_local(b.slot.ends_at) > now
-    ]
-    upcoming.sort(key=lambda b: b.slot.starts_at)
-    return upcoming
+def _my_entry(request: Request, db: Session, session_id: int | None) -> QueueEntry | None:
+    """Запись, которую поставил этот телефон, — только в текущем сеансе."""
+    entry = queue_service.entry_by_token(db, read_entry_token(request))
+    if entry is None or session_id is None or entry.session_id != session_id:
+        return None
+    return entry
 
 
-def _remember(response: Response, request: Request, token: str) -> None:
-    tokens = read_remembered(request)
-    if token not in tokens:
-        tokens.append(token)
+def _remember(response: Response, token: str) -> None:
     response.set_cookie(
-        BOOKINGS_COOKIE,
-        write_remembered(tokens),
-        max_age=BOOKINGS_COOKIE_MAX_AGE,
+        ENTRY_COOKIE,
+        write_entry_token(token),
+        max_age=ENTRY_COOKIE_MAX_AGE,
         httponly=True,
         secure=settings.cookie_secure,
         samesite="lax",
@@ -78,79 +59,73 @@ def _remember(response: Response, request: Request, token: str) -> None:
     )
 
 
-# ── Расписание ──────────────────────────────────────────────────────────
+def _queue_context(request: Request, db: Session) -> dict:
+    session = queue_service.current_session(db)
+    entries = queue_service.entries_of(db, session.id) if session else []
+    mine = _my_entry(request, db, session.id if session else None)
+    return {
+        "session": session,
+        "entries": entries,
+        "mine": mine,
+        "ahead": queue_service.waiting_before(entries, mine) if mine else 0,
+        "counters": queue_service.counters(entries),
+    }
+
+
+# ── Очередь ─────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Session = Depends(get_db)):
-    days = slot_service.upcoming_days(db)
-    return templates.TemplateResponse(
-        request,
-        "index.html",
+    context = _queue_context(request, db)
+    return templates.TemplateResponse(request, "index.html", context)
+
+
+@router.get("/q", include_in_schema=False)
+def qr_target():
+    """Куда ведёт QR-код на двери. Отдельный адрес — он короче и не меняется."""
+    return RedirectResponse("/", status_code=307)
+
+
+@router.get("/api/queue")
+def queue_fragment(request: Request, db: Session = Depends(get_db)):
+    """Свежий список для автообновления: рисуем тем же шаблоном, что и страницу."""
+    context = _queue_context(request, db)
+    session = context["session"]
+    html = templates.get_template("partials/queue_list.html").render(
+        {"request": request, **context}
+    )
+    return JSONResponse(
         {
-            "days": days,
-            "my_bookings": _my_bookings(request, db),
-            "purposes": _active_purposes(db),
-        },
+            "open": session is not None,
+            "session_id": session.id if session else None,
+            "waiting": context["counters"]["waiting"],
+            "ahead": context["ahead"],
+            "mine": context["mine"].number if context["mine"] else None,
+            "mine_status": context["mine"].status.value if context["mine"] else "",
+            "html": html,
+        }
     )
 
 
-@router.get("/d/{day_date}", response_class=HTMLResponse)
-def day_page(day_date: str, request: Request, db: Session = Depends(get_db)):
-    try:
-        parsed = dt.date.fromisoformat(day_date)
-    except ValueError:
-        return RedirectResponse("/", status_code=303)
+# ── Постановка в очередь ────────────────────────────────────────────────
 
-    day = slot_service.get_day(db, parsed)
-    if day is None or not day.is_published:
-        return templates.TemplateResponse(
-            request, "day_missing.html", {"day_date": parsed}, status_code=404
-        )
-
-    views = slot_service.day_slot_views(db, day)
-    return templates.TemplateResponse(
-        request,
-        "day.html",
-        {
-            "day": day,
-            "views": views,
-            "free_count": sum(1 for v in views if v.is_free),
-            "my_bookings": _my_bookings(request, db),
-        },
-    )
-
-
-# ── Бронь ───────────────────────────────────────────────────────────────
-
-def _load_slot(db: Session, slot_id: int) -> Slot | None:
-    return db.scalar(
-        select(Slot)
-        .options(selectinload(Slot.bookings), selectinload(Slot.day))
-        .where(Slot.id == slot_id)
-    )
-
-
-def _booking_form(
+def _join_form(
     request: Request,
     db: Session,
-    slot: Slot,
+    session,
     *,
     errors: dict[str, str] | None = None,
     values: dict[str, str] | None = None,
     status_code: int = 200,
 ):
-    challenge = issue_challenge(db)
     return templates.TemplateResponse(
         request,
-        "book.html",
+        "join.html",
         {
-            "slot": slot,
-            "day": slot.day,
-            "starts_at": slot_service.to_local(slot.starts_at),
-            "ends_at": slot_service.to_local(slot.ends_at),
+            "session": session,
             "purposes": _active_purposes(db),
-            "groups": slot_service.known_groups(db),
-            "challenge": challenge,
+            "groups": queue_service.known_groups(db),
+            "challenge": issue_challenge(db),
             "errors": errors or {},
             "values": values or {},
         },
@@ -158,30 +133,18 @@ def _booking_form(
     )
 
 
-@router.get("/book/{slot_id}", response_class=HTMLResponse)
-def book_form(slot_id: int, request: Request, db: Session = Depends(get_db)):
-    slot = _load_slot(db, slot_id)
-    if slot is None or not slot.day.is_published:
+@router.get("/join", response_class=HTMLResponse)
+def join_form(request: Request, db: Session = Depends(get_db)):
+    session = queue_service.current_session(db)
+    if session is None:
         return RedirectResponse("/", status_code=303)
-
-    state = slot_service.slot_state(slot, slot_service.now_local())
-    if state != "free":
-        return templates.TemplateResponse(
-            request,
-            "slot_unavailable.html",
-            {
-                "day": slot.day,
-                "starts_at": slot_service.to_local(slot.starts_at),
-                "state": state,
-            },
-            status_code=409,
-        )
-    return _booking_form(request, db, slot)
+    if _my_entry(request, db, session.id) is not None:
+        return RedirectResponse("/#my", status_code=303)
+    return _join_form(request, db, session)
 
 
-@router.post("/book/{slot_id}")
-def book_submit(
-    slot_id: int,
+@router.post("/join")
+def join_submit(
     request: Request,
     db: Session = Depends(get_db),
     full_name: str = Form(""),
@@ -190,21 +153,13 @@ def book_submit(
     comment: str = Form(""),
     captcha_id: str = Form(""),
 ):
-    slot = _load_slot(db, slot_id)
-    if slot is None or not slot.day.is_published:
+    session = queue_service.current_session(db)
+    if session is None:
         return RedirectResponse("/", status_code=303)
 
-    if slot_service.slot_state(slot, slot_service.now_local()) != "free":
-        return templates.TemplateResponse(
-            request,
-            "slot_unavailable.html",
-            {
-                "day": slot.day,
-                "starts_at": slot_service.to_local(slot.starts_at),
-                "state": slot_service.slot_state(slot, slot_service.now_local()),
-            },
-            status_code=409,
-        )
+    mine = _my_entry(request, db, session.id)
+    if mine is not None and mine.is_waiting:
+        return RedirectResponse("/#my", status_code=303)
 
     name = clean_full_name(full_name)
     group = clean_group(group_name)
@@ -231,44 +186,30 @@ def book_submit(
         errors["captcha"] = "Проверка не пройдена или устарела — решите задание заново."
 
     if not errors:
-        key = name_key(name)
-        active = slot_service.active_bookings_for(db, key, group)
-        if len(active) >= settings.max_active_bookings:
-            existing = active[0]
-            return templates.TemplateResponse(
-                request,
-                "already_booked.html",
-                {
-                    "booking": existing,
-                    "starts_at": slot_service.to_local(existing.slot.starts_at),
-                    "day": existing.slot.day,
-                },
-                status_code=409,
-            )
-
+        token = new_entry_token()
         try:
-            booking = slot_service.create_booking(
+            entry = queue_service.join_queue(
                 db,
-                slot=slot,
+                session=session,
                 full_name=name,
-                full_name_key=key,
+                full_name_key=name_key(name),
                 group_name=group,
                 purpose_id=purpose.id if purpose else None,
                 comment=comment,
-                cancel_token=new_cancel_token(),
+                token=token,
                 ip_hash=hash_ip(request),
             )
-        except slot_service.BookingError as exc:
-            errors["slot"] = str(exc)
+        except queue_service.QueueError as exc:
+            errors["queue"] = str(exc)
         else:
-            response = RedirectResponse(f"/b/{booking.cancel_token}?new=1", status_code=303)
-            _remember(response, request, booking.cancel_token)
+            response = RedirectResponse(f"/?new={entry.number}#my", status_code=303)
+            _remember(response, token)
             return response
 
-    return _booking_form(
+    return _join_form(
         request,
         db,
-        slot,
+        session,
         errors=errors,
         values={
             "full_name": name,
@@ -280,42 +221,12 @@ def book_submit(
     )
 
 
-# ── Талон ───────────────────────────────────────────────────────────────
-
-@router.get("/b/{token}", response_class=HTMLResponse)
-def ticket(token: str, request: Request, new: str = "", db: Session = Depends(get_db)):
-    booking = slot_service.find_by_token(db, token)
-    if booking is None:
-        return templates.TemplateResponse(request, "ticket_missing.html", {}, status_code=404)
-
-    starts_at = slot_service.to_local(booking.slot.starts_at)
-    now = slot_service.now_local()
-    response = templates.TemplateResponse(
-        request,
-        "ticket.html",
-        {
-            "booking": booking,
-            "day": booking.slot.day,
-            "starts_at": starts_at,
-            "ends_at": slot_service.to_local(booking.slot.ends_at),
-            "is_new": new == "1",
-            "can_cancel": booking.status == BookingStatus.booked and starts_at > now,
-            "is_past": starts_at <= now,
-        },
-    )
-    if booking.status == BookingStatus.booked:
-        _remember(response, request, booking.cancel_token)
-    return response
-
-
-@router.post("/b/{token}/cancel")
-def ticket_cancel(token: str, request: Request, db: Session = Depends(get_db)):
-    booking = slot_service.find_by_token(db, token)
-    if booking is None:
-        return RedirectResponse("/", status_code=303)
-    if booking.status == BookingStatus.booked:
-        slot_service.cancel_booking(db, booking)
-    return RedirectResponse(f"/b/{token}", status_code=303)
+@router.post("/leave")
+def leave_queue(request: Request, db: Session = Depends(get_db)):
+    entry = queue_service.entry_by_token(db, read_entry_token(request))
+    if entry is not None and entry.is_waiting:
+        queue_service.set_status(db, entry, EntryStatus.left)
+    return RedirectResponse("/", status_code=303)
 
 
 # ── Капча ───────────────────────────────────────────────────────────────

@@ -1,38 +1,40 @@
-"""Админ-панель преподавателя: дни, окна, брони, справочники, выгрузки."""
+"""Панель #au_team: приём, очередь, история, справочники, QR-код."""
 from __future__ import annotations
 
 import datetime as dt
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
+import segno
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from sqlalchemy import delete, func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.captcha import KINDS, issue_challenge
 from app.config import settings
 from app.db import get_db
-from app.models import (
-    Booking,
-    BookingStatus,
-    Purpose,
-    ReceptionDay,
-    ReceptionWindow,
-    Slot,
-)
+from app.models import EntryStatus, Purpose, QueueEntry, QueueSession, Setting
 from app.security import (
     ADMIN_COOKIE,
     ADMIN_SESSION_MAX_AGE,
     check_admin_credentials,
+    clean_full_name,
+    clean_group,
     make_admin_token,
+    name_key,
+    new_entry_token,
     require_admin,
+    validate_full_name,
+    validate_group,
 )
 from app.services import export as export_service
-from app.services import slots as slot_service
+from app.services import queue as queue_service
 from app.templating import templates
 
 router = APIRouter(prefix="/admin")
 guard = Depends(require_admin)
+
+PUBLIC_URL_KEY = "public_url"
 
 
 def _back(url: str, ok: str = "", err: str = "") -> RedirectResponse:
@@ -50,6 +52,32 @@ def _parse_time(raw: str) -> dt.time | None:
         return dt.time.fromisoformat((raw or "").strip())
     except ValueError:
         return None
+
+
+def _check_window(time_from: dt.time | None, time_to: dt.time | None) -> str:
+    if time_from and time_to and time_to <= time_from:
+        return "Конец приёма должен быть позже начала."
+    return ""
+
+
+def _active_purposes(db: Session) -> list[Purpose]:
+    return list(
+        db.scalars(
+            select(Purpose)
+            .where(Purpose.is_active.is_(True))
+            .order_by(Purpose.sort_order, Purpose.id)
+        ).all()
+    )
+
+
+def _public_url(request: Request, db: Session) -> str:
+    """Адрес для QR: сохранённый в админке, затем из env, затем из запроса."""
+    stored = db.get(Setting, PUBLIC_URL_KEY)
+    if stored and stored.value.strip():
+        return stored.value.strip().rstrip("/")
+    if settings.public_url.strip():
+        return settings.public_url.strip().rstrip("/")
+    return str(request.base_url).rstrip("/")
 
 
 # ── Вход ────────────────────────────────────────────────────────────────
@@ -88,440 +116,364 @@ def logout():
     return response
 
 
-# ── Сводка ──────────────────────────────────────────────────────────────
+# ── Приём и очередь ─────────────────────────────────────────────────────
 
 @router.get("", response_class=HTMLResponse, dependencies=[guard])
 @router.get("/", response_class=HTMLResponse, dependencies=[guard])
 def dashboard(request: Request, db: Session = Depends(get_db)):
-    today = slot_service.today_local()
-    summaries = slot_service.upcoming_days(db, include_unpublished=True)
+    session = queue_service.current_session(db)
+    entries = queue_service.entries_of(db, session.id) if session else []
 
-    today_bookings = list(
-        db.scalars(
-            select(Booking)
-            .join(Slot, Booking.slot_id == Slot.id)
-            .join(ReceptionDay, Slot.day_id == ReceptionDay.id)
-            .options(
-                selectinload(Booking.slot).selectinload(Slot.day),
-                selectinload(Booking.purpose),
-            )
-            .where(ReceptionDay.date == today, Booking.status != BookingStatus.cancelled)
-            .order_by(Slot.starts_at)
-        ).all()
-    )
+    # Подставляем ближайшую «круглую» пятиминутку и два часа приёма:
+    # поправить проще, чем набирать время с нуля.
+    start = queue_service.now_local().replace(second=0, microsecond=0)
+    start = start.replace(minute=start.minute - start.minute % 5)
 
-    totals = db.execute(
-        select(Booking.status, func.count(Booking.id)).group_by(Booking.status)
-    ).all()
+    recent = [
+        row
+        for row in queue_service.past_sessions(db, limit=6)
+        if session is None or row[0].id != session.id
+    ]
 
     return templates.TemplateResponse(
         request,
         "admin/dashboard.html",
         {
-            "summaries": summaries,
-            "today": today,
-            "today_bookings": today_bookings,
-            "totals": {BookingStatus(s).label: n for s, n in totals},
-            "purposes_count": db.scalar(select(func.count(Purpose.id))) or 0,
-        },
-    )
-
-
-# ── Дни приёма ──────────────────────────────────────────────────────────
-
-@router.get("/days", response_class=HTMLResponse, dependencies=[guard])
-def days_list(request: Request, db: Session = Depends(get_db)):
-    days = list(
-        db.scalars(
-            select(ReceptionDay)
-            .options(selectinload(ReceptionDay.windows))
-            .order_by(ReceptionDay.date.desc())
-        ).all()
-    )
-    counts = dict(
-        db.execute(
-            select(Slot.day_id, func.count(Slot.id)).group_by(Slot.day_id)
-        ).all()
-    )
-    booked = dict(
-        db.execute(
-            select(Slot.day_id, func.count(Booking.id))
-            .join(Booking, Booking.slot_id == Slot.id)
-            .where(Booking.status != BookingStatus.cancelled)
-            .group_by(Slot.day_id)
-        ).all()
-    )
-    return templates.TemplateResponse(
-        request,
-        "admin/days.html",
-        {
-            "days": days,
-            "counts": counts,
-            "booked": booked,
-            "today": slot_service.today_local(),
-            "ok": request.query_params.get("ok", ""),
-            "err": request.query_params.get("err", ""),
-            "default_date": slot_service.today_local().isoformat(),
-        },
-    )
-
-
-@router.post("/days", dependencies=[guard])
-def day_create(
-    db: Session = Depends(get_db),
-    date: str = Form(""),
-    room: str = Form(""),
-    note: str = Form(""),
-    start_time: str = Form(""),
-    end_time: str = Form(""),
-    slot_minutes: int = Form(5),
-):
-    try:
-        parsed = dt.date.fromisoformat(date.strip())
-    except ValueError:
-        return _back("/admin/days", err="Дата указана неверно.")
-
-    if slot_service.get_day(db, parsed) is not None:
-        return _back("/admin/days", err=f"День {parsed:%d.%m.%Y} уже заведён.")
-
-    day = ReceptionDay(date=parsed, room=room.strip()[:64], note=note.strip())
-    db.add(day)
-    db.flush()
-
-    start = _parse_time(start_time)
-    end = _parse_time(end_time)
-    if start and end:
-        window = ReceptionWindow(
-            day_id=day.id, start_time=start, end_time=end, slot_minutes=max(slot_minutes, 1)
-        )
-        window.day = day
-        db.add(window)
-        db.flush()
-        try:
-            slot_service.rebuild_window_slots(db, window)
-        except slot_service.WindowError as exc:
-            db.rollback()
-            return _back("/admin/days", err=str(exc))
-
-    db.commit()
-    return _back(f"/admin/days/{day.id}", ok=f"День {parsed:%d.%m.%Y} создан.")
-
-
-@router.get("/days/{day_id}", response_class=HTMLResponse, dependencies=[guard])
-def day_detail(day_id: int, request: Request, db: Session = Depends(get_db)):
-    day = db.get(ReceptionDay, day_id)
-    if day is None:
-        return _back("/admin/days", err="День не найден.")
-
-    views = slot_service.day_slot_views(db, day)
-    bookings = [v.slot.active_booking for v in views if v.slot.active_booking is not None]
-
-    return templates.TemplateResponse(
-        request,
-        "admin/day.html",
-        {
-            "day": day,
-            "views": views,
-            "bookings": bookings,
-            "free_count": sum(1 for v in views if v.is_free),
+            "session": session,
+            "entries": entries,
+            "counters": queue_service.counters(entries),
+            "purposes": _active_purposes(db),
+            "recent": recent[:5],
+            "default_room": settings.default_room,
+            "default_from": f"{start:%H:%M}",
+            "default_to": f"{start + dt.timedelta(hours=2):%H:%M}",
             "ok": request.query_params.get("ok", ""),
             "err": request.query_params.get("err", ""),
         },
     )
 
 
-@router.post("/days/{day_id}/update", dependencies=[guard])
-def day_update(
-    day_id: int,
+@router.post("/session/open", dependencies=[guard])
+def session_open(
     db: Session = Depends(get_db),
     room: str = Form(""),
+    time_from: str = Form(""),
+    time_to: str = Form(""),
     note: str = Form(""),
-    is_published: str = Form(""),
 ):
-    day = db.get(ReceptionDay, day_id)
-    if day is None:
-        return _back("/admin/days", err="День не найден.")
-    day.room = room.strip()[:64]
-    day.note = note.strip()
-    day.is_published = is_published == "on"
-    db.commit()
-    return _back(f"/admin/days/{day_id}", ok="Сохранено.")
-
-
-@router.post("/days/{day_id}/delete", dependencies=[guard])
-def day_delete(day_id: int, db: Session = Depends(get_db)):
-    day = db.get(ReceptionDay, day_id)
-    if day is None:
-        return _back("/admin/days", err="День не найден.")
-
-    active = db.scalar(
-        select(func.count(Booking.id))
-        .join(Slot, Booking.slot_id == Slot.id)
-        .where(Slot.day_id == day_id, Booking.status != BookingStatus.cancelled)
-    )
-    if active:
-        return _back(
-            f"/admin/days/{day_id}",
-            err=f"В этом дне {active} активных броней. Снимите день с публикации "
-            "или отмените брони — так студенты не окажутся с талоном в никуда.",
+    start, end = _parse_time(time_from), _parse_time(time_to)
+    if error := _check_window(start, end):
+        return _back("/admin", err=error)
+    try:
+        queue_service.open_session(
+            db,
+            room=room or settings.default_room,
+            time_from=start,
+            time_to=end,
+            note=note,
         )
-
-    label = f"{day.date:%d.%m.%Y}"
-    db.delete(day)
-    db.commit()
-    return _back("/admin/days", ok=f"День {label} удалён.")
+    except queue_service.QueueError as exc:
+        return _back("/admin", err=str(exc))
+    return _back("/admin", ok="Приём открыт. Студенты уже видят очередь.")
 
 
-# ── Окна приёма ─────────────────────────────────────────────────────────
-
-@router.post("/days/{day_id}/windows", dependencies=[guard])
-def window_create(
-    day_id: int,
+@router.post("/session/update", dependencies=[guard])
+def session_update(
     db: Session = Depends(get_db),
-    start_time: str = Form(""),
-    end_time: str = Form(""),
-    slot_minutes: int = Form(5),
-    title: str = Form(""),
+    room: str = Form(""),
+    time_from: str = Form(""),
+    time_to: str = Form(""),
+    note: str = Form(""),
 ):
-    day = db.get(ReceptionDay, day_id)
-    if day is None:
-        return _back("/admin/days", err="День не найден.")
+    session = queue_service.current_session(db)
+    if session is None:
+        return _back("/admin", err="Приём не открыт.")
 
-    start, end = _parse_time(start_time), _parse_time(end_time)
-    if start is None or end is None:
-        return _back(f"/admin/days/{day_id}", err="Время окна указано неверно.")
+    start, end = _parse_time(time_from), _parse_time(time_to)
+    if error := _check_window(start, end):
+        return _back("/admin", err=error)
 
-    window = ReceptionWindow(
-        day_id=day.id,
-        start_time=start,
-        end_time=end,
-        slot_minutes=max(int(slot_minutes), 1),
-        title=title.strip()[:120],
-    )
-    window.day = day
-    db.add(window)
-    db.flush()
-    try:
-        added, _ = slot_service.rebuild_window_slots(db, window)
-    except slot_service.WindowError as exc:
-        db.rollback()
-        return _back(f"/admin/days/{day_id}", err=str(exc))
-
+    session.room = room.strip()[:64]
+    session.time_from = start
+    session.time_to = end
+    session.note = note.strip()
     db.commit()
-    return _back(f"/admin/days/{day_id}", ok=f"Окно добавлено, слотов: {added}.")
+    return _back("/admin", ok="Сохранено.")
 
 
-@router.post("/windows/{window_id}/update", dependencies=[guard])
-def window_update(
-    window_id: int,
+@router.post("/session/close", dependencies=[guard])
+def session_close(db: Session = Depends(get_db)):
+    session = queue_service.current_session(db)
+    if session is None:
+        return _back("/admin", err="Приём и так закрыт.")
+
+    session_id = session.id
+    left = queue_service.close_session(db, session)
+    message = "Приём закрыт, список ушёл в историю."
+    if left:
+        message += f" Не дождались: {left}."
+    return _back(f"/admin/sessions/{session_id}", ok=message)
+
+
+@router.post("/entries", dependencies=[guard])
+def entry_add(
     db: Session = Depends(get_db),
-    start_time: str = Form(""),
-    end_time: str = Form(""),
-    slot_minutes: int = Form(5),
-    title: str = Form(""),
+    full_name: str = Form(""),
+    group_name: str = Form(""),
+    purpose_id: str = Form(""),
+    comment: str = Form(""),
 ):
-    window = db.get(ReceptionWindow, window_id)
-    if window is None:
-        return _back("/admin/days", err="Окно не найдено.")
+    """Поставить в очередь руками — для тех, кто пришёл без телефона."""
+    session = queue_service.current_session(db)
+    if session is None:
+        return _back("/admin", err="Приём не открыт — вставать некуда.")
 
-    start, end = _parse_time(start_time), _parse_time(end_time)
-    if start is None or end is None:
-        return _back(f"/admin/days/{window.day_id}", err="Время окна указано неверно.")
+    name = clean_full_name(full_name)
+    group = clean_group(group_name)
+    if error := validate_full_name(name):
+        return _back("/admin", err=error)
+    if error := validate_group(group):
+        return _back("/admin", err=error)
 
-    window.start_time = start
-    window.end_time = end
-    window.slot_minutes = max(int(slot_minutes), 1)
-    window.title = title.strip()[:120]
-    db.flush()
-
+    purpose = next((p for p in _active_purposes(db) if str(p.id) == purpose_id), None)
     try:
-        added, removed = slot_service.rebuild_window_slots(db, window)
-    except slot_service.WindowError as exc:
-        db.rollback()
-        return _back(f"/admin/days/{window.day_id}", err=str(exc))
+        entry = queue_service.join_queue(
+            db,
+            session=session,
+            full_name=name,
+            full_name_key=name_key(name),
+            group_name=group,
+            purpose_id=purpose.id if purpose else None,
+            comment=(comment or "").strip()[:200],
+            token=new_entry_token(),
+            added_by_admin=True,
+        )
+    except queue_service.QueueError as exc:
+        return _back("/admin", err=str(exc))
+    return _back("/admin", ok=f"№{entry.number} — {entry.full_name}, добавлен вручную.")
 
-    db.commit()
+
+@router.post("/entries/{entry_id}/status", dependencies=[guard])
+def entry_status(
+    entry_id: int,
+    db: Session = Depends(get_db),
+    status: str = Form(""),
+    back: str = Form("/admin"),
+):
+    entry = db.get(QueueEntry, entry_id)
+    if entry is None:
+        return _back(back, err="Запись не найдена.")
+    if status not in {s.value for s in EntryStatus}:
+        return _back(back, err="Неизвестный статус.")
+
+    queue_service.set_status(db, entry, EntryStatus(status))
     return _back(
-        f"/admin/days/{window.day_id}",
-        ok=f"Окно обновлено: добавлено {added}, убрано {removed}. "
-        "Слоты с бронями сохранены.",
+        back,
+        ok=f"№{entry.number} {entry.full_name}: {EntryStatus(status).label.lower()}.",
     )
 
 
-@router.post("/windows/{window_id}/delete", dependencies=[guard])
-def window_delete(window_id: int, db: Session = Depends(get_db)):
-    window = db.get(ReceptionWindow, window_id)
-    if window is None:
-        return _back("/admin/days", err="Окно не найдено.")
-    day_id = window.day_id
-
-    active = db.scalar(
-        select(func.count(Booking.id))
-        .join(Slot, Booking.slot_id == Slot.id)
-        .where(Slot.window_id == window_id, Booking.status != BookingStatus.cancelled)
-    )
-    if active:
-        return _back(
-            f"/admin/days/{day_id}",
-            err=f"В окне {active} активных броней — сначала разберитесь с ними.",
-        )
-
-    db.delete(window)
+@router.post("/entries/{entry_id}/delete", dependencies=[guard])
+def entry_delete(
+    entry_id: int,
+    db: Session = Depends(get_db),
+    back: str = Form("/admin"),
+):
+    entry = db.get(QueueEntry, entry_id)
+    if entry is None:
+        return _back(back, err="Запись не найдена.")
+    name = entry.full_name
+    db.delete(entry)
     db.commit()
-    return _back(f"/admin/days/{day_id}", ok="Окно удалено.")
+    return _back(back, ok=f"«{name}» убран из очереди без следа.")
 
 
-@router.post("/slots/{slot_id}/toggle", dependencies=[guard])
-def slot_toggle(slot_id: int, db: Session = Depends(get_db)):
-    slot = db.scalar(
-        select(Slot).options(selectinload(Slot.bookings)).where(Slot.id == slot_id)
+# ── История приёмов ─────────────────────────────────────────────────────
+
+@router.get("/sessions", response_class=HTMLResponse, dependencies=[guard])
+def sessions_list(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(
+        request,
+        "admin/sessions.html",
+        {
+            "rows": queue_service.past_sessions(db),
+            "ok": request.query_params.get("ok", ""),
+            "err": request.query_params.get("err", ""),
+        },
     )
-    if slot is None:
-        return _back("/admin/days", err="Слот не найден.")
-    if slot.active_booking is not None:
-        return _back(f"/admin/days/{slot.day_id}", err="Слот занят — сначала отмените бронь.")
-    slot.is_blocked = not slot.is_blocked
+
+
+@router.get("/sessions/{session_id}", response_class=HTMLResponse, dependencies=[guard])
+def session_detail(session_id: int, request: Request, db: Session = Depends(get_db)):
+    session = queue_service.session_by_id(db, session_id)
+    if session is None:
+        return _back("/admin/sessions", err="Такого приёма не было.")
+    entries = queue_service.entries_of(db, session.id)
+    return templates.TemplateResponse(
+        request,
+        "admin/session.html",
+        {
+            "session": session,
+            "entries": entries,
+            "counters": queue_service.counters(entries),
+            "title": queue_service.session_title(session),
+            "ok": request.query_params.get("ok", ""),
+            "err": request.query_params.get("err", ""),
+        },
+    )
+
+
+@router.post("/sessions/{session_id}/delete", dependencies=[guard])
+def session_delete(session_id: int, db: Session = Depends(get_db)):
+    session = db.get(QueueSession, session_id)
+    if session is None:
+        return _back("/admin/sessions", err="Такого приёма не было.")
+    if session.is_open:
+        return _back("/admin/sessions", err="Сначала закройте приём.")
+    label = queue_service.session_title(session)
+    db.delete(session)
     db.commit()
-    state = "закрыт" if slot.is_blocked else "открыт"
-    return _back(f"/admin/days/{slot.day_id}", ok=f"Слот {state}.")
+    return _back("/admin/sessions", ok=f"{label} — удалён вместе со списком.")
 
 
-# ── Брони ───────────────────────────────────────────────────────────────
+@router.get("/sessions/{session_id}/export.csv", dependencies=[guard])
+def export_csv(session_id: int, db: Session = Depends(get_db)):
+    session = queue_service.session_by_id(db, session_id)
+    if session is None:
+        return _back("/admin/sessions", err="Такого приёма не было.")
+    data = export_service.to_csv(
+        queue_service.entries_of(db, session.id), queue_service.session_title(session)
+    )
+    stamp = queue_service.to_local(session.opened_at).date()
+    return Response(
+        data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="ochered-{stamp}.csv"'},
+    )
 
-@router.get("/bookings", response_class=HTMLResponse, dependencies=[guard])
-def bookings_list(
+
+@router.get("/sessions/{session_id}/export.xlsx", dependencies=[guard])
+def export_xlsx(session_id: int, db: Session = Depends(get_db)):
+    session = queue_service.session_by_id(db, session_id)
+    if session is None:
+        return _back("/admin/sessions", err="Такого приёма не было.")
+    data = export_service.to_xlsx(
+        queue_service.entries_of(db, session.id), queue_service.session_title(session)
+    )
+    stamp = queue_service.to_local(session.opened_at).date()
+    return Response(
+        data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="ochered-{stamp}.xlsx"'},
+    )
+
+
+@router.get("/sessions/{session_id}/print", response_class=HTMLResponse, dependencies=[guard])
+def print_list(session_id: int, request: Request, db: Session = Depends(get_db)):
+    session = queue_service.session_by_id(db, session_id)
+    if session is None:
+        return _back("/admin/sessions", err="Такого приёма не было.")
+    return templates.TemplateResponse(
+        request,
+        "admin/print.html",
+        {
+            "session": session,
+            "entries": queue_service.entries_of(db, session.id),
+            "title": queue_service.session_title(session),
+        },
+    )
+
+
+# ── Поиск по всем записям ───────────────────────────────────────────────
+
+@router.get("/entries", response_class=HTMLResponse, dependencies=[guard])
+def entries_search(
     request: Request,
     db: Session = Depends(get_db),
     group: str = "",
     status: str = "",
-    day: str = "",
+    date: str = "",
     q: str = "",
 ):
     query = (
-        select(Booking)
-        .join(Slot, Booking.slot_id == Slot.id)
-        .join(ReceptionDay, Slot.day_id == ReceptionDay.id)
-        .options(
-            selectinload(Booking.slot).selectinload(Slot.day),
-            selectinload(Booking.purpose),
-        )
-        .order_by(Slot.starts_at.desc())
+        select(QueueEntry)
+        .options(selectinload(QueueEntry.purpose), selectinload(QueueEntry.session))
+        .join(QueueSession, QueueEntry.session_id == QueueSession.id)
+        .order_by(QueueEntry.created_at.desc())
     )
     if group:
-        query = query.where(Booking.group_name == group.strip().upper())
-    if status in {s.value for s in BookingStatus}:
-        query = query.where(Booking.status == BookingStatus(status))
-    if day:
+        query = query.where(QueueEntry.group_name == clean_group(group))
+    if status in {s.value for s in EntryStatus}:
+        query = query.where(QueueEntry.status == EntryStatus(status))
+    if date:
         try:
-            query = query.where(ReceptionDay.date == dt.date.fromisoformat(day))
+            day = dt.date.fromisoformat(date)
         except ValueError:
             pass
+        else:
+            start = dt.datetime.combine(day, dt.time.min, tzinfo=settings.tz)
+            query = query.where(
+                QueueSession.opened_at >= start,
+                QueueSession.opened_at < start + dt.timedelta(days=1),
+            )
     if q:
-        query = query.where(Booking.full_name.ilike(f"%{q.strip()}%"))
+        query = query.where(QueueEntry.full_name.ilike(f"%{q.strip()}%"))
 
-    bookings = list(db.scalars(query.limit(500)).all())
     return templates.TemplateResponse(
         request,
-        "admin/bookings.html",
+        "admin/entries.html",
         {
-            "bookings": bookings,
-            "groups": slot_service.known_groups(db),
-            "statuses": list(BookingStatus),
-            "filters": {"group": group, "status": status, "day": day, "q": q},
+            "entries": list(db.scalars(query.limit(500)).all()),
+            "groups": queue_service.known_groups(db),
+            "statuses": list(EntryStatus),
+            "filters": {"group": group, "status": status, "date": date, "q": q},
             "ok": request.query_params.get("ok", ""),
             "err": request.query_params.get("err", ""),
         },
     )
 
 
-@router.post("/bookings/{booking_id}/status", dependencies=[guard])
-def booking_status(
-    booking_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    status: str = Form(""),
-    back: str = Form("/admin/bookings"),
-):
-    booking = db.get(Booking, booking_id)
-    if booking is None:
-        return _back(back, err="Бронь не найдена.")
-    if status not in {s.value for s in BookingStatus}:
-        return _back(back, err="Неизвестный статус.")
+# ── QR-код на дверь ─────────────────────────────────────────────────────
 
-    booking.status = BookingStatus(status)
-    if booking.status == BookingStatus.cancelled:
-        booking.cancelled_at = dt.datetime.now(dt.timezone.utc)
-    db.commit()
-    return _back(back, ok=f"{booking.full_name}: {BookingStatus(status).label.lower()}.")
-
-
-@router.post("/bookings/{booking_id}/delete", dependencies=[guard])
-def booking_delete(
-    booking_id: int,
-    db: Session = Depends(get_db),
-    back: str = Form("/admin/bookings"),
-):
-    booking = db.get(Booking, booking_id)
-    if booking is None:
-        return _back(back, err="Бронь не найдена.")
-    name = booking.full_name
-    db.delete(booking)
-    db.commit()
-    return _back(back, ok=f"Запись «{name}» удалена без следа.")
-
-
-# ── Выгрузки и печать ───────────────────────────────────────────────────
-
-def _day_bookings(db: Session, day: ReceptionDay) -> list[Booking]:
-    return list(
-        db.scalars(
-            select(Booking)
-            .join(Slot, Booking.slot_id == Slot.id)
-            .options(selectinload(Booking.slot), selectinload(Booking.purpose))
-            .where(Slot.day_id == day.id, Booking.status != BookingStatus.cancelled)
-            .order_by(Slot.starts_at)
-        ).all()
+@router.get("/qr", response_class=HTMLResponse, dependencies=[guard])
+def qr_page(request: Request, db: Session = Depends(get_db)):
+    base = _public_url(request, db)
+    target = f"{base}/q"
+    # error="m" — код читается, даже если лист затёрли или оторвали угол.
+    # omitsize=True добавляет viewBox: без него svg не масштабируется,
+    # и код прижимается к углу рамки, вместо того чтобы её заполнить.
+    svg = segno.make(target, error="m").svg_inline(
+        scale=10, border=2, dark="#000000", light="#FFFFFF", omitsize=True
     )
-
-
-@router.get("/days/{day_id}/export.csv", dependencies=[guard])
-def export_csv(day_id: int, db: Session = Depends(get_db)):
-    day = db.get(ReceptionDay, day_id)
-    if day is None:
-        return _back("/admin/days", err="День не найден.")
-    title = f"Приём {slot_service.format_date_full(day.date)}"
-    data = export_service.to_csv(_day_bookings(db, day), title)
-    return Response(
-        data,
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="priem-{day.date}.csv"'},
-    )
-
-
-@router.get("/days/{day_id}/export.xlsx", dependencies=[guard])
-def export_xlsx(day_id: int, db: Session = Depends(get_db)):
-    day = db.get(ReceptionDay, day_id)
-    if day is None:
-        return _back("/admin/days", err="День не найден.")
-    title = f"Приём {slot_service.format_date_full(day.date)}"
-    data = export_service.to_xlsx(_day_bookings(db, day), title)
-    return Response(
-        data,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="priem-{day.date}.xlsx"'},
-    )
-
-
-@router.get("/days/{day_id}/print", response_class=HTMLResponse, dependencies=[guard])
-def print_list(day_id: int, request: Request, db: Session = Depends(get_db)):
-    day = db.get(ReceptionDay, day_id)
-    if day is None:
-        return _back("/admin/days", err="День не найден.")
     return templates.TemplateResponse(
         request,
-        "admin/print.html",
-        {"day": day, "bookings": _day_bookings(db, day)},
+        "admin/qr.html",
+        {
+            "qr_svg": svg,
+            "target": target,
+            "base": base,
+            "host": urlsplit(target).netloc,
+            "ok": request.query_params.get("ok", ""),
+            "err": request.query_params.get("err", ""),
+        },
     )
+
+
+@router.post("/qr", dependencies=[guard])
+def qr_save(db: Session = Depends(get_db), base: str = Form("")):
+    value = base.strip().rstrip("/")
+    if value and not value.startswith(("http://", "https://")):
+        return _back("/admin/qr", err="Адрес должен начинаться с http:// или https://")
+
+    stored = db.get(Setting, PUBLIC_URL_KEY)
+    if stored is None:
+        db.add(Setting(key=PUBLIC_URL_KEY, value=value))
+    else:
+        stored.value = value
+    db.commit()
+    if not value:
+        return _back("/admin/qr", ok="Адрес сброшен — берём его из текущего запроса.")
+    return _back("/admin/qr", ok="Адрес сохранён, QR перерисован.")
 
 
 # ── Цели визита ─────────────────────────────────────────────────────────
@@ -592,11 +544,9 @@ def purpose_delete(purpose_id: int, db: Session = Depends(get_db)):
     purpose = db.get(Purpose, purpose_id)
     if purpose is None:
         return _back("/admin/purposes", err="Пункт не найден.")
-    db.execute(
-        delete(Purpose).where(Purpose.id == purpose_id)
-    )
+    db.delete(purpose)
     db.commit()
-    return _back("/admin/purposes", ok="Пункт удалён, у прежних броней он просто опустеет.")
+    return _back("/admin/purposes", ok="Пункт удалён, у прежних записей он просто опустеет.")
 
 
 # ── Просмотр капчи ──────────────────────────────────────────────────────

@@ -1,38 +1,37 @@
 {% extends "base.html" %}
-{% block title %}Список на {{ day.date.strftime('%d.%m.%Y') }}{% endblock %}
+{% block title %}{{ title }}{% endblock %}
 {% block container_class %}{% endblock %}
 
 {% block content %}
 <div class="print-head">
-  <h1 style="margin-bottom:var(--space-2)">Приём студентов</h1>
+  <h1 style="margin-bottom:var(--space-2)">Живая очередь на приём</h1>
   <p style="margin:0"><strong>{{ teacher_name }}</strong></p>
   <p style="margin:0">
-    {{ day.date | dfull }}{% if day.room %} · кабинет {{ day.room }}{% endif %} ·
-    записано: {{ bookings | length }}
+    {{ title }}{% if session.room %} · кабинет {{ session.room }}{% endif %} ·
+    в очереди было: {{ entries | length }}
   </p>
 </div>
 
 <div class="btn-row no-print" style="margin-bottom:var(--space-5)">
   <button type="button" class="btn btn--primary" data-print>Печать</button>
-  <a class="btn btn--ghost" href="/admin/days/{{ day.id }}">Назад</a>
+  <a class="btn btn--ghost" href="/admin/sessions/{{ session.id }}">Назад</a>
 </div>
 
-{% if bookings %}
+{% if entries %}
 <div class="table-scroll">
   <table class="data">
     <thead>
-      <tr><th>№</th><th>Время</th><th>ФИО</th><th>Группа</th><th>Цель визита</th><th>Отметка</th><th>Подпись</th></tr>
+      <tr><th>№</th><th>Фамилия и имя</th><th>Группа</th><th>С чем приходил</th><th>Отметка</th><th>Подпись</th></tr>
     </thead>
     <tbody>
-      {% for booking in bookings %}
+      {% for entry in entries %}
       <tr>
-        <td>{{ loop.index }}</td>
-        <td class="time">{{ booking.slot.starts_at | hm }}</td>
-        <td>{{ booking.full_name }}</td>
-        <td class="mono">{{ booking.group_name }}</td>
+        <td class="time">{{ entry.number }}</td>
+        <td>{{ entry.full_name }}</td>
+        <td class="mono">{{ entry.group_name }}</td>
         <td>
-          {{ booking.purpose.title if booking.purpose else '—' }}
-          {% if booking.comment %}<br><span class="muted" style="font-size:var(--text-12)">{{ booking.comment }}</span>{% endif %}
+          {{ entry.purpose.title if entry.purpose else '—' }}
+          {% if entry.comment %}<br><span class="muted" style="font-size:var(--text-12)">{{ entry.comment }}</span>{% endif %}
         </td>
         <td style="width:90px"></td>
         <td style="width:120px"></td>
@@ -44,11 +43,11 @@
 
 <div class="print-sign">
   <div>Всего принято: ____________</div>
-  <div>Подпись преподавателя: ____________________</div>
+  <div>Подпись: ____________________</div>
 </div>
 {% else %}
 <div class="empty">
-  <div class="empty__title">На этот день записей нет</div>
+  <div class="empty__title">В этот приём никто не записался</div>
 </div>
 {% endif %}
 {% endblock %}

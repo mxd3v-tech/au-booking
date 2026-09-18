@@ -1,0 +1,81 @@
+{% extends "admin/base.html" %}
+{% block title %}Записи{% endblock %}
+
+{% block admin_content %}
+<h1>Записи</h1>
+<p class="muted">Поиск по всем приёмам — например, чтобы вспомнить, когда студент последний раз доходил.</p>
+
+<form method="get" action="/admin/entries" class="toolbar">
+  <div class="field">
+    <label class="field__label" for="q">Фамилия</label>
+    <input class="input" type="search" id="q" name="q" value="{{ filters.q }}" placeholder="Иванов">
+  </div>
+  <div class="field">
+    <label class="field__label" for="group">Группа</label>
+    <input class="input input--mono" type="text" id="group" name="group" value="{{ filters.group }}"
+           list="groups-list" placeholder="{{ group_placeholder }}">
+    <datalist id="groups-list">
+      {% for group in groups %}<option value="{{ group }}"></option>{% endfor %}
+    </datalist>
+  </div>
+  <div class="field">
+    <label class="field__label" for="status">Статус</label>
+    <select class="input" id="status" name="status">
+      <option value="">любой</option>
+      {% for status in statuses %}
+      <option value="{{ status.value }}" {% if filters.status == status.value %}selected{% endif %}>{{ status.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label class="field__label" for="date">Дата приёма</label>
+    <input class="input" type="date" id="date" name="date" value="{{ filters.date }}">
+  </div>
+  <button type="submit" class="btn btn--primary">Показать</button>
+  <a class="btn btn--ghost" href="/admin/entries">Сбросить</a>
+</form>
+
+{% if entries %}
+<div class="table-scroll">
+  <table class="data">
+    <thead>
+      <tr><th>Приём</th><th>№</th><th>Фамилия и имя</th><th>Группа</th><th>С чем приходил</th><th>Статус</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for entry in entries %}
+      <tr>
+        <td class="nowrap"><a href="/admin/sessions/{{ entry.session_id }}">{{ entry.session.opened_at | dtime }}</a></td>
+        <td class="time">{{ entry.number }}</td>
+        <td>{{ entry.full_name }}</td>
+        <td class="mono">{{ entry.group_name }}</td>
+        <td>
+          {{ entry.purpose.title if entry.purpose else '—' }}
+          {% if entry.comment %}<br><span class="muted" style="font-size:var(--text-12)">{{ entry.comment }}</span>{% endif %}
+        </td>
+        <td>{{ entry.status | status_label }}</td>
+        <td class="nowrap">
+          <button class="btn btn--ghost btn--sm" form="rm-{{ entry.id }}">Удалить</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div hidden>
+  {% for entry in entries %}
+  <form id="rm-{{ entry.id }}" method="post" action="/admin/entries/{{ entry.id }}/delete"
+        data-confirm="Удалить запись «{{ entry.full_name }}»? Она исчезнет из истории совсем.">
+    <input type="hidden" name="back" value="/admin/entries">
+  </form>
+  {% endfor %}
+</div>
+
+<p class="field__hint" style="margin-top:var(--space-4)">Показаны первые 500 записей, свежие сверху.</p>
+{% else %}
+<div class="empty">
+  <div class="empty__title">Ничего не нашлось</div>
+  <p class="muted" style="margin:0 auto">Попробуйте снять часть фильтров.</p>
+</div>
+{% endif %}
+{% endblock %}

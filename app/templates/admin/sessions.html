@@ -1,0 +1,45 @@
+{% extends "admin/base.html" %}
+{% block title %}История приёмов{% endblock %}
+
+{% block admin_content %}
+<h1>История приёмов</h1>
+<p class="muted">Хранится бессрочно. Удаление — только вручную, вместе со списком.</p>
+
+{% if rows %}
+<div class="table-scroll">
+  <table class="data">
+    <thead>
+      <tr><th>Открыт</th><th>Закрыт</th><th>Кабинет</th><th>Записалось</th><th>Принято</th><th>Выгрузка</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for session, total, done in rows %}
+      <tr>
+        <td class="nowrap">{{ session.opened_at | dtime }}</td>
+        <td class="nowrap">
+          {% if session.closed_at %}{{ session.closed_at | hm }}
+          {% else %}<span class="badge badge--free">идёт сейчас</span>{% endif %}
+        </td>
+        <td>
+          {{ session.room or '—' }}
+          {% if session.time_label %}<br><span class="muted" style="font-size:var(--text-12)">{{ session.time_label }}</span>{% endif %}
+        </td>
+        <td>{{ total }}</td>
+        <td>{{ done }}</td>
+        <td class="nowrap">
+          <a href="/admin/sessions/{{ session.id }}/export.xlsx">XLSX</a> ·
+          <a href="/admin/sessions/{{ session.id }}/export.csv">CSV</a> ·
+          <a href="/admin/sessions/{{ session.id }}/print" target="_blank" rel="noopener">печать</a>
+        </td>
+        <td class="nowrap"><a href="/admin/sessions/{{ session.id }}">Открыть</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">
+  <div class="empty__title">Приёмов ещё не было</div>
+  <p class="muted" style="margin:0 auto">Откройте первый на странице «Очередь».</p>
+</div>
+{% endif %}
+{% endblock %}

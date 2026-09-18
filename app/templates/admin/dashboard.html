@@ -1,97 +1,235 @@
 {% extends "admin/base.html" %}
-{% block title %}Сводка{% endblock %}
+{% block title %}Очередь{% endblock %}
 
 {% block admin_content %}
-<h1>Сводка</h1>
+
+{% if session %}
+
+<div class="status-bar status-bar--open">
+  <span class="status-bar__dot" aria-hidden="true"></span>
+  <span class="status-bar__text">Приём идёт</span>
+  <span class="status-bar__meta">
+    {%- if session.room %}каб. {{ session.room }} · {% endif -%}
+    {%- if session.time_label %}{{ session.time_label }} · {% endif -%}
+    открыт в {{ session.opened_at | hm }}
+  </span>
+  <form method="post" action="/admin/session/close" class="inline-form" style="margin-left:auto"
+        data-confirm="Закрыть приём? Список уйдёт в историю, новые люди встать не смогут.">
+    <button type="submit" class="btn btn--danger btn--sm">Закрыть приём</button>
+  </form>
+</div>
 
 <div class="stat-row">
-  <div class="stat">
-    <div class="stat__value">{{ today_bookings | length }}</div>
-    <div class="stat__label">записей на сегодня</div>
-  </div>
-  <div class="stat">
-    <div class="stat__value">{{ summaries | sum(attribute='free') }}</div>
-    <div class="stat__label">свободных слотов впереди</div>
-  </div>
-  <div class="stat">
-    <div class="stat__value">{{ totals.get('Принят', 0) }}</div>
-    <div class="stat__label">принято всего</div>
-  </div>
-  <div class="stat">
-    <div class="stat__value">{{ totals.get('Неявка', 0) }}</div>
-    <div class="stat__label">неявок всего</div>
-  </div>
+  <div class="stat"><div class="stat__value">{{ counters.waiting }}</div><div class="stat__label">ждут</div></div>
+  <div class="stat"><div class="stat__value">{{ counters.done }}</div><div class="stat__label">принято</div></div>
+  <div class="stat"><div class="stat__value">{{ counters.no_show }}</div><div class="stat__label">не подошли</div></div>
+  <div class="stat"><div class="stat__value">{{ counters.total }}</div><div class="stat__label">всего записалось</div></div>
 </div>
 
 <section class="section">
-  <h2>Сегодня, {{ today.strftime('%d.%m.%Y') }}</h2>
-  {% if today_bookings %}
+  <div class="toolbar">
+    <h2 style="margin:0;margin-right:auto">Очередь</h2>
+    <a class="btn btn--ghost btn--sm" href="/admin/qr">QR на дверь</a>
+    <a class="btn btn--ghost btn--sm" href="/admin/sessions/{{ session.id }}/print" target="_blank" rel="noopener">Печать</a>
+    <a class="btn btn--ghost btn--sm" href="/admin/sessions/{{ session.id }}/export.xlsx">XLSX</a>
+    <a class="btn btn--ghost btn--sm" href="/admin/sessions/{{ session.id }}/export.csv">CSV</a>
+  </div>
+
+  {% if entries %}
   <div class="table-scroll">
     <table class="data">
       <thead>
-        <tr><th>Время</th><th>ФИО</th><th>Группа</th><th>Цель</th><th>Статус</th><th>Отметка</th></tr>
+        <tr>
+          <th>№</th><th>Фамилия и имя</th><th>Группа</th><th>С чем идёт</th>
+          <th>Статус</th><th>Встал</th><th class="no-print">Отметка</th>
+        </tr>
       </thead>
       <tbody>
-        {% for booking in today_bookings %}
+        {% for entry in entries %}
         <tr>
-          <td class="time">{{ booking.slot.starts_at | hm }}</td>
-          <td>{{ booking.full_name }}{% if booking.comment %}<br><span class="muted" style="font-size:var(--text-12)">{{ booking.comment }}</span>{% endif %}</td>
-          <td class="mono">{{ booking.group_name }}</td>
-          <td>{{ booking.purpose.title if booking.purpose else '—' }}</td>
+          <td class="time">{{ entry.number }}</td>
           <td>
-            <span class="badge {{ 'badge--ok' if booking.status.value == 'done' else ('badge--danger' if booking.status.value == 'no_show' else '') }}">
-              {{ booking.status | status_label }}
-            </span>
+            {{ entry.full_name }}
+            {% if entry.added_by_admin %}<span class="badge">вручную</span>{% endif %}
+          </td>
+          <td class="mono">{{ entry.group_name }}</td>
+          <td>
+            {{ entry.purpose.title if entry.purpose else '—' }}
+            {% if entry.comment %}<br><span class="muted" style="font-size:var(--text-12)">{{ entry.comment }}</span>{% endif %}
           </td>
           <td>
-            <div class="btn-row" style="gap:var(--space-2)">
-              {% for value, label in [('done','Принят'), ('no_show','Неявка'), ('booked','Ожидает')] %}
-              <form method="post" action="/admin/bookings/{{ booking.id }}/status" class="inline-form">
-                <input type="hidden" name="status" value="{{ value }}">
-                <input type="hidden" name="back" value="/admin">
-                <button type="submit" class="btn btn--sm {{ 'btn--primary' if booking.status.value == value else 'btn--ghost' }}">{{ label }}</button>
-              </form>
-              {% endfor %}
-            </div>
+            {% if entry.status.value == 'waiting' %}<span class="badge badge--free">Ожидает</span>
+            {% elif entry.status.value == 'done' %}<span class="badge badge--ok">Принят</span>
+            {% elif entry.status.value == 'no_show' %}<span class="badge badge--warn">Не подошёл</span>
+            {% else %}<span class="badge">Ушёл</span>{% endif %}
+          </td>
+          <td class="muted nowrap">{{ entry.created_at | hm }}</td>
+          <td class="no-print nowrap">
+            {% if entry.status.value == 'waiting' %}
+            <button class="btn btn--primary btn--sm" form="st-{{ entry.id }}" name="status" value="done">Принят</button>
+            <button class="btn btn--ghost btn--sm" form="st-{{ entry.id }}" name="status" value="no_show">Не подошёл</button>
+            {% else %}
+            <button class="btn btn--ghost btn--sm" form="st-{{ entry.id }}" name="status" value="waiting">Вернуть в очередь</button>
+            {% endif %}
+            <button class="btn btn--ghost btn--sm" form="del-{{ entry.id }}">Убрать</button>
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+
+  {# Формы держим вне таблицы: form внутри tr браузер выбрасывает наружу,
+     а кнопки находят свою форму по атрибуту form. #}
+  <div hidden>
+    {% for entry in entries %}
+    <form id="st-{{ entry.id }}" method="post" action="/admin/entries/{{ entry.id }}/status">
+      <input type="hidden" name="back" value="/admin">
+    </form>
+    <form id="del-{{ entry.id }}" method="post" action="/admin/entries/{{ entry.id }}/delete"
+          data-confirm="Убрать «{{ entry.full_name }}» из очереди? Запись исчезнет совсем.">
+      <input type="hidden" name="back" value="/admin">
+    </form>
+    {% endfor %}
+  </div>
   {% else %}
   <div class="empty">
-    <div class="empty__title">На сегодня записей нет</div>
-    <p class="muted" style="margin:0 auto">Либо день не назначен, либо группа ещё не проснулась.</p>
+    <div class="empty__title">В очереди пока никого</div>
+    <p class="muted" style="margin:0 auto">Покажите студентам QR-код — он на соседней вкладке.</p>
   </div>
   {% endif %}
 </section>
 
 <section class="section">
-  <h2>Ближайшие дни</h2>
-  {% if summaries %}
-  <div class="grid grid--3">
-    {% for summary in summaries %}
-    <a class="card card--hover day-card" href="/admin/days/{{ summary.day.id }}">
-      <div>
-        <div class="day-card__date">{{ summary.day.date | dshort }}</div>
-        <div class="day-card__weekday">{{ summary.day.date | dfull }}</div>
-      </div>
-      <div class="day-card__meter"><span style="width: {{ (100 * summary.taken / summary.total) | round | int }}%"></span></div>
-      <div>
-        <span class="badge badge--free">Свободно {{ summary.free }}</span>
-        <span class="badge">Занято {{ summary.taken }}</span>
-        {% if not summary.day.is_published %}<span class="badge badge--warn">Черновик</span>{% endif %}
-      </div>
-    </a>
-    {% endfor %}
+  <div class="grid grid--2">
+    <div class="card">
+      <h3>Записать вручную</h3>
+      <p class="card__meta">Для тех, кто пришёл без телефона.</p>
+      <form method="post" action="/admin/entries">
+        <div class="field">
+          <label class="field__label" for="m_name">Фамилия и имя</label>
+          <input class="input" type="text" id="m_name" name="full_name" required maxlength="160"
+                 placeholder="Иванов Иван">
+        </div>
+        <div class="field">
+          <label class="field__label" for="m_group">Группа</label>
+          <input class="input input--mono" type="text" id="m_group" name="group_name" required
+                 maxlength="32" placeholder="{{ group_placeholder }}" data-group-input>
+        </div>
+        {% if purposes %}
+        <div class="field">
+          <label class="field__label" for="m_purpose">С чем идёт</label>
+          <select class="input" id="m_purpose" name="purpose_id">
+            <option value="">— не указано —</option>
+            {% for purpose in purposes %}
+            <option value="{{ purpose.id }}">{{ purpose.title }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endif %}
+        <button type="submit" class="btn btn--primary">Поставить в очередь</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Параметры приёма</h3>
+      <p class="card__meta">Видно студентам в шапке страницы.</p>
+      <form method="post" action="/admin/session/update">
+        <div class="field">
+          <label class="field__label" for="u_room">Кабинет</label>
+          <input class="input" type="text" id="u_room" name="room" maxlength="64" value="{{ session.room }}">
+        </div>
+        <div class="form-row">
+          <div class="field">
+            <label class="field__label" for="u_from">Приём с</label>
+            <input class="input" type="time" id="u_from" name="time_from"
+                   value="{{ session.time_from.strftime('%H:%M') if session.time_from else '' }}">
+          </div>
+          <div class="field">
+            <label class="field__label" for="u_to">до</label>
+            <input class="input" type="time" id="u_to" name="time_to"
+                   value="{{ session.time_to.strftime('%H:%M') if session.time_to else '' }}">
+          </div>
+        </div>
+        <div class="field">
+          <label class="field__label" for="u_note">Заметка</label>
+          <textarea class="textarea" id="u_note" name="note" maxlength="500"
+                    placeholder="Сегодня только пересдачи">{{ session.note }}</textarea>
+        </div>
+        <button type="submit" class="btn btn--ghost">Сохранить</button>
+      </form>
+    </div>
   </div>
-  {% else %}
-  <div class="empty">
-    <div class="empty__title">Впереди пусто</div>
-    <p class="muted" style="margin:0 auto var(--space-4)">Назначьте день приёма — студенты увидят его сразу.</p>
-    <a class="btn btn--primary" href="/admin/days">Назначить день</a>
-  </div>
-  {% endif %}
 </section>
+
+{% else %}
+
+<div class="status-bar">
+  <span class="status-bar__dot" aria-hidden="true"></span>
+  <span class="status-bar__text">Приём закрыт</span>
+  <span class="status-bar__meta">Студенты видят «сейчас приёма нет»</span>
+</div>
+
+<section class="section">
+  <div class="card">
+    <h2>Открыть приём</h2>
+    <p class="card__meta">
+      Очередь начнётся с первого номера. Пока приём открыт, любой, кто отсканирует
+      QR-код, может встать в список.
+    </p>
+    <form method="post" action="/admin/session/open">
+      <div class="form-row">
+        <div class="field">
+          <label class="field__label" for="o_room">Кабинет</label>
+          <input class="input" type="text" id="o_room" name="room" maxlength="64"
+                 value="{{ default_room }}">
+        </div>
+        <div class="field">
+          <label class="field__label" for="o_from">Приём с</label>
+          <input class="input" type="time" id="o_from" name="time_from" value="{{ default_from }}">
+        </div>
+        <div class="field">
+          <label class="field__label" for="o_to">до</label>
+          <input class="input" type="time" id="o_to" name="time_to" value="{{ default_to }}">
+        </div>
+      </div>
+      <p class="field__hint" style="margin:calc(-1 * var(--space-2)) 0 var(--space-4)">
+        Время — подпись для студентов. Очередь закроется тогда, когда вы нажмёте
+        «Закрыть приём», а не по часам.
+      </p>
+      <div class="field">
+        <label class="field__label" for="o_note">Заметка <span class="muted">(необязательно)</span></label>
+        <textarea class="textarea" id="o_note" name="note" maxlength="500"
+                  placeholder="Сегодня принимаю только пересдачи"></textarea>
+      </div>
+      <button type="submit" class="btn btn--primary btn--lg">Открыть приём</button>
+    </form>
+  </div>
+</section>
+
+{% endif %}
+
+{% if recent %}
+<section class="section">
+  <h2>Последние приёмы</h2>
+  <div class="table-scroll">
+    <table class="data">
+      <thead><tr><th>Когда</th><th>Кабинет</th><th>Записалось</th><th>Принято</th><th></th></tr></thead>
+      <tbody>
+        {% for row, total, done in recent %}
+        <tr>
+          <td>{{ row.opened_at | dtime }}</td>
+          <td>{{ row.room or '—' }}</td>
+          <td>{{ total }}</td>
+          <td>{{ done }}</td>
+          <td><a href="/admin/sessions/{{ row.id }}">Открыть</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p style="margin-top:var(--space-4)"><a href="/admin/sessions">Вся история →</a></p>
+</section>
+{% endif %}
+
 {% endblock %}

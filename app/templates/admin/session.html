@@ -1,0 +1,61 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ title }}{% endblock %}
+
+{% block admin_content %}
+<p><a href="/admin/sessions" class="muted">← К истории</a></p>
+
+<h1>{{ title }}</h1>
+<p class="muted">
+  {%- if session.room %}Кабинет {{ session.room }} · {% endif -%}
+  {%- if session.time_label %}{{ session.time_label }} · {% endif -%}
+  {% if session.closed_at %}закрыт в {{ session.closed_at | hm }}{% else %}идёт прямо сейчас{% endif %}
+  {%- if session.note %} · {{ session.note }}{% endif -%}
+</p>
+
+<div class="stat-row">
+  <div class="stat"><div class="stat__value">{{ counters.total }}</div><div class="stat__label">записалось</div></div>
+  <div class="stat"><div class="stat__value">{{ counters.done }}</div><div class="stat__label">принято</div></div>
+  <div class="stat"><div class="stat__value">{{ counters.no_show }}</div><div class="stat__label">не подошли</div></div>
+  <div class="stat"><div class="stat__value">{{ counters.left }}</div><div class="stat__label">ушли сами</div></div>
+</div>
+
+<div class="toolbar">
+  <a class="btn btn--ghost btn--sm" href="/admin/sessions/{{ session.id }}/print" target="_blank" rel="noopener">Печать</a>
+  <a class="btn btn--ghost btn--sm" href="/admin/sessions/{{ session.id }}/export.xlsx">XLSX</a>
+  <a class="btn btn--ghost btn--sm" href="/admin/sessions/{{ session.id }}/export.csv">CSV</a>
+  {% if not session.is_open %}
+  <form method="post" action="/admin/sessions/{{ session.id }}/delete" class="inline-form"
+        style="margin-left:auto"
+        data-confirm="Удалить этот приём вместе со списком из {{ counters.total }} человек? Отменить будет нельзя.">
+    <button type="submit" class="btn btn--danger btn--sm">Удалить приём</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if entries %}
+<div class="table-scroll">
+  <table class="data">
+    <thead>
+      <tr><th>№</th><th>Фамилия и имя</th><th>Группа</th><th>С чем приходил</th><th>Статус</th><th>Встал</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in entries %}
+      <tr>
+        <td class="time">{{ entry.number }}</td>
+        <td>{{ entry.full_name }}</td>
+        <td class="mono">{{ entry.group_name }}</td>
+        <td>
+          {{ entry.purpose.title if entry.purpose else '—' }}
+          {% if entry.comment %}<br><span class="muted" style="font-size:var(--text-12)">{{ entry.comment }}</span>{% endif %}
+        </td>
+        <td>{{ entry.status | status_label }}</td>
+        <td class="muted nowrap">{{ entry.created_at | hm }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty"><div class="empty__title">В этот приём никто не записался</div></div>
+{% endif %}
+{% endblock %}

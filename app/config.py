@@ -26,22 +26,27 @@ class Settings:
         "DATABASE_URL", "postgresql+psycopg://au_queue:au_queue@db:5432/au_queue"
     )
     secret_key: str = os.getenv("SECRET_KEY", "dev-insecure-secret-key")
-    admin_username: str = os.getenv("ADMIN_USERNAME", "uymin")
+    admin_username: str = os.getenv("ADMIN_USERNAME", "admin")
     admin_password: str = os.getenv("ADMIN_PASSWORD", "admin")
 
-    teacher_name: str = os.getenv("TEACHER_NAME", "Уймин Антон Григорьевич")
-    teacher_title: str = os.getenv("TEACHER_TITLE", "Преподаватель")
-    site_title: str = os.getenv("SITE_TITLE", "Запись на приём")
+    teacher_name: str = os.getenv("TEACHER_NAME", "#au_team")
+    teacher_title: str = os.getenv("TEACHER_TITLE", "Приём")
+    site_title: str = os.getenv("SITE_TITLE", "Живая очередь")
 
-    tz_name: str = os.getenv("TZ", "Asia/Yekaterinburg")
+    default_room: str = os.getenv("ROOM", "1215")
+
+    # Адрес, который зашивается в QR-код. Пусто — берём из запроса;
+    # за прокси это может оказаться внутренним адресом, тогда пропишите явно.
+    public_url: str = os.getenv("PUBLIC_URL", "")
+
+    tz_name: str = os.getenv("TZ", "Europe/Moscow")
 
     # Ставить только при работе за HTTPS: с этим флагом браузер не отправит
     # куку по обычному http, и в локальной сети вход в админку «сломается».
     cookie_secure: bool = _bool("COOKIE_SECURE", False)
 
-    booking_lead_minutes: int = _int("BOOKING_LEAD_MINUTES", 5)
-    max_active_bookings: int = _int("MAX_ACTIVE_BOOKINGS", 1)
-    days_ahead: int = _int("DAYS_AHEAD", 30)
+    # Как часто страница очереди сама подтягивает свежий список, секунд.
+    poll_seconds: int = _int("POLL_SECONDS", 15)
 
     captcha_ttl_seconds: int = _int("CAPTCHA_TTL_SECONDS", 600)
     captcha_max_attempts: int = _int("CAPTCHA_MAX_ATTEMPTS", 4)

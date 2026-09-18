@@ -223,7 +223,7 @@ def verify_challenge(db: Session, challenge_id: str, submitted: str) -> dict:
 
 
 def consume_challenge(db: Session, challenge_id: str) -> bool:
-    """Погасить решённое задание при отправке формы. Одно задание — одна бронь."""
+    """Погасить решённое задание при отправке формы. Одно задание — одна запись."""
     challenge = db.get(CaptchaChallenge, challenge_id or "")
     now = dt.datetime.now(dt.timezone.utc)
     if (

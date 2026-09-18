@@ -65,7 +65,7 @@
 
   // ── Капча ─────────────────────────────────────────────────────────────
   var slot = document.querySelector('[data-captcha-slot]');
-  var submitButton = document.querySelector('[data-booking-submit]');
+  var submitButton = document.querySelector('[data-join-submit]');
   var hiddenInput = document.querySelector('[data-captcha-input]');
 
   function setSubmitReady(ready) {
@@ -73,8 +73,8 @@
     submitButton.disabled = !ready;
     submitButton.classList.toggle('is-disabled', !ready);
     submitButton.textContent = ready
-      ? 'Записаться на приём'
-      : 'Решите задание, чтобы записаться';
+      ? 'Встать в очередь'
+      : 'Решите задание, чтобы встать в очередь';
   }
 
   function showFeedback(box, result) {
@@ -248,9 +248,58 @@
 
   if (slot) bind(slot.querySelector('[data-captcha]'));
 
-  // Просмотр капчи в админке — тот же движок, без формы брони
+  // Просмотр капчи в админке — тот же движок, без формы записи
   var preview = document.querySelector('[data-captcha-preview] [data-captcha]');
   if (preview) bind(preview);
+
+  // ── Живая очередь сама подтягивает свежий список ──────────────────────
+  function people(count) {
+    var tail = count % 10;
+    var hundred = count % 100;
+    if (tail === 1 && hundred !== 11) return count + ' человек';
+    if (tail >= 2 && tail <= 4 && (hundred < 12 || hundred > 14)) return count + ' человека';
+    return count + ' человек';
+  }
+
+  var queueBox = document.querySelector('[data-queue-list]');
+  if (queueBox) {
+    var statusBar = document.querySelector('[data-queue-status]');
+    var wasOpen = !!statusBar && statusBar.classList.contains('status-bar--open');
+    var myStatus = queueBox.getAttribute('data-mine-status') || '';
+    var every = Math.max(parseInt(queueBox.getAttribute('data-poll'), 10) || 15, 5) * 1000;
+
+    function refreshQueue() {
+      // В фоне телефон всё равно ничего не показывает — не тратим батарею.
+      if (document.hidden) return;
+
+      fetch('/api/queue', { headers: { 'Accept': 'application/json' } })
+        .then(function (response) { return response.json(); })
+        .then(function (data) {
+          // Приём открыли или закрыли, либо мою запись отметили в админке —
+          // меняется вся страница, а не один список.
+          if (data.open !== wasOpen || (data.mine_status || '') !== myStatus) {
+            window.location.reload();
+            return;
+          }
+
+          queueBox.innerHTML = data.html;
+
+          var badge = document.querySelector('[data-waiting-badge]');
+          if (badge) badge.textContent = 'ждут: ' + data.waiting;
+
+          var ahead = document.querySelector('[data-ahead]');
+          if (ahead && data.mine !== null) {
+            ahead.textContent = data.ahead === 0 ? 'Вы следующий' : 'Перед вами: ' + people(data.ahead);
+          }
+        })
+        .catch(function () { /* связь моргнула — попробуем на следующем круге */ });
+    }
+
+    setInterval(refreshQueue, every);
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) refreshQueue();
+    });
+  }
 
   // ── Комментарий обязателен для некоторых целей визита ─────────────────
   var commentField = document.getElementById('comment');

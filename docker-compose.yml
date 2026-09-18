@@ -7,8 +7,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-au_queue}
       POSTGRES_USER: ${POSTGRES_USER:-au_queue}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      TZ: ${TZ:-Asia/Yekaterinburg}
-      PGTZ: ${TZ:-Asia/Yekaterinburg}
+      TZ: ${TZ:-Europe/Moscow}
+      PGTZ: ${TZ:-Europe/Moscow}
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -29,20 +29,20 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-au_queue}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-au_queue}
-      TZ: ${TZ:-Asia/Yekaterinburg}
+      TZ: ${TZ:-Europe/Moscow}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
-      ADMIN_USERNAME: ${ADMIN_USERNAME:-uymin}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
-      TEACHER_NAME: ${TEACHER_NAME:-Уймин Антон Григорьевич}
-      TEACHER_TITLE: ${TEACHER_TITLE:-Преподаватель}
-      SITE_TITLE: ${SITE_TITLE:-Запись на приём}
-      BOOKING_LEAD_MINUTES: ${BOOKING_LEAD_MINUTES:-5}
-      MAX_ACTIVE_BOOKINGS: ${MAX_ACTIVE_BOOKINGS:-1}
+      TEACHER_NAME: "${TEACHER_NAME:-#au_team}"
+      TEACHER_TITLE: ${TEACHER_TITLE:-Приём}
+      SITE_TITLE: ${SITE_TITLE:-Живая очередь}
+      ROOM: ${ROOM:-1215}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      POLL_SECONDS: ${POLL_SECONDS:-15}
       CAPTCHA_TTL_SECONDS: ${CAPTCHA_TTL_SECONDS:-600}
       CAPTCHA_MAX_ATTEMPTS: ${CAPTCHA_MAX_ATTEMPTS:-4}
       GROUP_PATTERN: ${GROUP_PATTERN:-^[А-ЯЁ]{2}-[0-9]{2}-[0-9]{2}$}
       GROUP_PLACEHOLDER: ${GROUP_PLACEHOLDER:-КТ-24-04}
-      DAYS_AHEAD: ${DAYS_AHEAD:-30}
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${BIND_PORT:-8080}:8000"

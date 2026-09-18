@@ -1,0 +1,47 @@
+{% extends "admin/base.html" %}
+{% block title %}QR-код на дверь{% endblock %}
+
+{% block admin_content %}
+<h1 class="no-print">QR-код на дверь</h1>
+<p class="muted no-print">
+  Распечатайте и повесьте у кабинета. Код постоянный: менять его при каждом приёме не нужно.
+</p>
+
+<div class="qr-sheet">
+  <h2 style="margin-bottom:var(--space-2)">Живая очередь на приём</h2>
+  <p class="muted" style="margin:0 auto var(--space-5)">{{ teacher_name }}{% if settings.default_room %} · кабинет {{ settings.default_room }}{% endif %}</p>
+
+  <div class="qr-sheet__code">{{ qr_svg | safe }}</div>
+
+  <div class="qr-sheet__url">{{ target }}</div>
+  <p class="muted" style="margin:var(--space-4) auto 0;max-width:46ch">
+    Наведите камеру телефона — откроется список очереди. Записаться можно,
+    только пока приём открыт.
+  </p>
+</div>
+
+<div class="btn-row no-print" style="margin-top:var(--space-5)">
+  <button type="button" class="btn btn--primary" data-print>Печать</button>
+  <a class="btn btn--ghost" href="{{ target }}" target="_blank" rel="noopener">Проверить ссылку</a>
+</div>
+
+<section class="section no-print">
+  <div class="card">
+    <h3>Адрес в коде</h3>
+    <p class="card__meta">
+      Сейчас: <span class="mono">{{ base }}</span>. Если сервис открывается снаружи
+      по другому имени, впишите его здесь — иначе код уведёт студентов в никуда.
+      Пустое поле — брать адрес из текущего запроса.
+    </p>
+    <form method="post" action="/admin/qr">
+      <div class="field">
+        <label class="field__label" for="base">Внешний адрес</label>
+        <input class="input input--mono" type="url" id="base" name="base" value="{{ base }}"
+               placeholder="https://queue.example.ru" maxlength="200">
+        <div class="field__hint">Без «/q» на конце — его допишет сам сервис.</div>
+      </div>
+      <button type="submit" class="btn btn--ghost">Сохранить</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

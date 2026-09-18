@@ -1,4 +1,4 @@
-"""Выгрузка списка записанных: CSV для Excel и настоящий XLSX."""
+"""Выгрузка очереди: CSV для Excel и настоящий XLSX."""
 from __future__ import annotations
 
 import csv
@@ -8,47 +8,43 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from app.models import Booking, BookingStatus
-from app.services.slots import to_local
+from app.models import EntryStatus, QueueEntry
+from app.services.queue import to_local
 
-HEADERS = ["№", "Время", "ФИО", "Группа", "Цель визита", "Комментарий", "Статус", "Записан"]
+HEADERS = ["№", "Фамилия и имя", "Группа", "Цель визита", "Комментарий", "Статус", "Встал в очередь"]
 
 BRAND = "015D1E"
 
 
-def _rows(bookings: list[Booking]) -> list[list[str]]:
-    rows: list[list[str]] = []
-    for index, booking in enumerate(bookings, start=1):
-        slot = booking.slot
-        rows.append(
-            [
-                str(index),
-                f"{to_local(slot.starts_at):%H:%M}–{to_local(slot.ends_at):%H:%M}",
-                booking.full_name,
-                booking.group_name,
-                booking.purpose.title if booking.purpose else "",
-                booking.comment,
-                BookingStatus(booking.status).label,
-                f"{to_local(booking.created_at):%d.%m.%Y %H:%M}",
-            ]
-        )
-    return rows
+def _rows(entries: list[QueueEntry]) -> list[list[str]]:
+    return [
+        [
+            str(entry.number),
+            entry.full_name,
+            entry.group_name,
+            entry.purpose.title if entry.purpose else "",
+            entry.comment,
+            EntryStatus(entry.status).label,
+            f"{to_local(entry.created_at):%d.%m.%Y %H:%M}",
+        ]
+        for entry in entries
+    ]
 
 
-def to_csv(bookings: list[Booking], title: str) -> bytes:
+def to_csv(entries: list[QueueEntry], title: str) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";", quoting=csv.QUOTE_MINIMAL)
     writer.writerow([title])
     writer.writerow(HEADERS)
-    writer.writerows(_rows(bookings))
+    writer.writerows(_rows(entries))
     # BOM — чтобы Excel не превратил кириллицу в кракозябры
     return "﻿".encode("utf-8") + buffer.getvalue().encode("utf-8")
 
 
-def to_xlsx(bookings: list[Booking], title: str) -> bytes:
+def to_xlsx(entries: list[QueueEntry], title: str) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Запись на приём"
+    sheet.title = "Очередь"
 
     sheet["A1"] = title
     sheet["A1"].font = Font(bold=True, size=13, color=BRAND)
@@ -65,13 +61,13 @@ def to_xlsx(bookings: list[Booking], title: str) -> bytes:
         cell.border = border
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    for row_index, row in enumerate(_rows(bookings), start=4):
+    for row_index, row in enumerate(_rows(entries), start=4):
         for column, value in enumerate(row, start=1):
             cell = sheet.cell(row=row_index, column=column, value=value)
             cell.border = border
-            cell.alignment = Alignment(vertical="center", wrap_text=column in (5, 6))
+            cell.alignment = Alignment(vertical="center", wrap_text=column in (4, 5))
 
-    widths = [5, 14, 34, 12, 26, 30, 12, 18]
+    widths = [5, 30, 12, 26, 30, 14, 18]
     for column, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(column)].width = width
 

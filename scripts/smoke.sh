@@ -1,59 +1,64 @@
 #!/bin/bash
-# Сквозная проверка: админка → день → слот → капча → бронь → отмена
+# Сквозная проверка живой очереди: админка → приём → QR → капча → номерок → история
 set -u
 BASE=${BASE:-http://127.0.0.1:8080}
 CD=$(cd "$(dirname "$0")/.." && pwd)
-J=$(mktemp); S=$(mktemp)
-DATE=$(date -d "+2 days" +%F)
+A=$(mktemp); U1=$(mktemp); U2=$(mktemp); U3=$(mktemp); S=$(mktemp)
 pass=0; fail=0
 ok(){ echo "  ok   $1"; pass=$((pass+1)); }
 no(){ echo "  FAIL $1"; fail=$((fail+1)); }
 sql(){ docker compose --project-directory "$CD" exec -T db psql -U au_queue -t -A -c "$1"; }
 
 # Учётные данные берём из .env, чтобы тест не расходился с настройками стенда
-envval(){ grep -E "^$1=" "$CD/.env" 2>/dev/null | head -1 | cut -d= -f2- ; }
-ADMIN_USER=$(envval ADMIN_USERNAME); ADMIN_USER=${ADMIN_USER:-uymin}
+envval(){ grep -E "^$1=" "$CD/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' ; }
+ADMIN_USER=$(envval ADMIN_USERNAME); ADMIN_USER=${ADMIN_USER:-admin}
 ADMIN_PASS=$(envval ADMIN_PASSWORD); ADMIN_PASS=${ADMIN_PASS:-admin}
-post(){ local u="$1"; shift; curl -s "$BASE$u" "$@"; }
+
+code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
 echo "== 0. Чистая площадка"
-sql "delete from reception_day where date='$DATE'" >/dev/null && ok "прошлый прогон убран"
+sql "delete from queue_session" >/dev/null && ok "прошлые приёмы убраны"
 
 echo "== 1. Вход в админку"
-code=$(curl -s -o /dev/null -w '%{http_code}' -c "$J" -X POST "$BASE/admin/login" \
+c=$(code -c "$A" -X POST "$BASE/admin/login" \
   --data-urlencode "username=$ADMIN_USER" --data-urlencode "password=$ADMIN_PASS")
-[ "$code" = 303 ] && ok "логин 303" || no "логин вернул $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -b "$J" "$BASE/admin")
-[ "$code" = 200 ] && ok "сводка доступна" || no "сводка вернула $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin/days")
-[ "$code" = 303 ] && ok "без входа редирект на логин" || no "защита админки: $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/admin/login" \
+[ "$c" = 303 ] && ok "логин 303" || no "логин вернул $c"
+c=$(code -b "$A" "$BASE/admin"); [ "$c" = 200 ] && ok "панель доступна" || no "панель вернула $c"
+c=$(code "$BASE/admin/sessions"); [ "$c" = 303 ] && ok "без входа редирект на логин" || no "защита админки: $c"
+c=$(code -X POST "$BASE/admin/login" \
   --data-urlencode "username=$ADMIN_USER" --data-urlencode "password=пароль-с-кириллицей")
-[ "$code" = 401 ] && ok "кириллический пароль → 401, а не 500" || no "неверный пароль: $code"
+[ "$c" = 401 ] && ok "кириллический пароль → 401, а не 500" || no "неверный пароль: $c"
 
-echo "== 2. Создание дня $DATE, окно 14:00-16:00 по 5 мин"
-curl -s -o /dev/null -b "$J" -X POST "$BASE/admin/days" \
-  --data-urlencode "date=$DATE" --data-urlencode "room=312" \
-  --data-urlencode "note=Приносите отчёт" --data-urlencode "start_time=14:00" \
-  --data-urlencode "end_time=16:00" --data-urlencode "slot_minutes=5"
-n=$(sql "select count(*) from slot s join reception_day d on d.id=s.day_id where d.date='$DATE'")
-[ "$n" = 24 ] && ok "нарезано 24 слота" || no "слотов: $n (ждали 24)"
-DAYID=$(sql "select id from reception_day where date='$DATE'")
-code=$(curl -s -o /dev/null -w '%{http_code}' -b "$J" -X POST "$BASE/admin/days" \
-  --data-urlencode "date=$DATE")
-[ "$code" = 303 ] && ok "повторная дата не создаёт дубль" || no "дубль дня: $code"
+echo "== 2. Приём закрыт"
+curl -s "$BASE/" | grep -q "Сейчас приёма нет" && ok "студент видит «приёма нет»" || no "нет надписи о закрытом приёме"
+c=$(code "$BASE/join"); [ "$c" = 303 ] && ok "встать в очередь нельзя" || no "/join при закрытом приёме: $c"
 
-echo "== 3. Студенческие страницы"
-curl -s "$BASE/" | grep -q "$DATE" && ok "день виден на главной" || no "дня нет на главной"
-curl -s "$BASE/d/$DATE" > "$S"
-grep -q "14:00" "$S" && ok "сетка времени отрисована" || no "нет сетки времени"
-[ "$(grep -c 'slot--free' "$S")" = 24 ] && ok "24 свободных слота" || no "свободных: $(grep -c 'slot--free' "$S")"
-grep -q "Кабинет 312" "$S" && ok "кабинет показан" || no "кабинет не показан"
-code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/d/2000-01-01")
-[ "$code" = 404 ] && ok "несуществующий день 404" || no "несуществующий день: $code"
+echo "== 3. Открытие приёма"
+c=$(code -b "$A" -X POST "$BASE/admin/session/open" \
+  --data-urlencode "room=1215" --data-urlencode "time_from=14:00" --data-urlencode "time_to=16:00" \
+  --data-urlencode "note=Сегодня только пересдачи")
+[ "$c" = 303 ] && ok "приём открыт" || no "открытие вернуло $c"
+SID=$(sql "select id from queue_session where closed_at is null")
+[ -n "$SID" ] && ok "сеанс №$SID открыт" || no "открытого сеанса нет"
+r=$(sql "insert into queue_session (room, note) values ('999','')" 2>&1)
+echo "$r" | grep -q "uq_session_open" && ok "второй приём отклонён базой" || no "база пустила два приёма: $r"
 
-SLOT=$(sql "select s.id from slot s join reception_day d on d.id=s.day_id where d.date='$DATE' order by s.starts_at limit 1")
-SLOT2=$(sql "select s.id from slot s join reception_day d on d.id=s.day_id where d.date='$DATE' order by s.starts_at offset 1 limit 1")
+# без -X POST: иначе curl повторит POST и после редиректа, а нам нужен GET
+curl -s -L -b "$A" "$BASE/admin/session/update" \
+  --data-urlencode "room=1215" --data-urlencode "time_from=16:00" --data-urlencode "time_to=14:00" > "$S"
+grep -q "позже начала" "$S" && ok "конец раньше начала не принимается" || no "кривое окно принято"
+# возвращаем как было — форма шлёт все поля разом, и заметку в том числе
+curl -s -o /dev/null -b "$A" "$BASE/admin/session/update" \
+  --data-urlencode "room=1215" --data-urlencode "time_from=14:00" --data-urlencode "time_to=16:00" \
+  --data-urlencode "note=Сегодня только пересдачи"
+
+echo "== 4. Главная страница студента"
+curl -s "$BASE/" > "$S"
+grep -q "Приём идёт" "$S" && ok "видно, что приём идёт" || no "нет отметки о приёме"
+grep -q "каб. 1215" "$S" && ok "кабинет 1215 показан" || no "кабинет не показан"
+grep -q "14:00–16:00" "$S" && ok "время приёма показано" || no "времени приёма не видно"
+grep -q "Сегодня только пересдачи" "$S" && ok "заметка показана" || no "заметки нет"
+grep -q "Встать в очередь" "$S" && ok "кнопка записи на месте" || no "нет кнопки записи"
 
 solve(){ sql "select kind || '|' || answer::text from captcha_challenge where id='$1'" | python3 -c '
 import sys, json
@@ -65,17 +70,17 @@ print({"truth_myth": lambda: ",".join("1" if v else "0" for v in a["values"]),
        "quiz":       lambda: str(a["index"])}[kind]())'; }
 cid_of(){ grep -o 'data-id="[^"]*"' "$1" | head -1 | cut -d'"' -f2; }
 
-echo "== 4. Капча: все четыре типа"
+echo "== 5. Капча: все четыре типа"
 for kind in truth_myth net_scheme subnet quiz; do
-  curl -s -b "$J" "$BASE/admin/captcha?kind=$kind" > "$S"
+  curl -s -b "$A" "$BASE/admin/captcha?kind=$kind" > "$S"
   cid=$(cid_of "$S")
   grep -q '"answer"' "$S" && no "$kind: правильный ответ утёк в HTML!" || ok "$kind: ответа нет в разметке"
   r=$(curl -s -X POST "$BASE/api/captcha/$cid" --data-urlencode "answer=$(solve "$cid")")
   echo "$r" | grep -q '"ok":true' && ok "$kind: верный ответ принят" || no "$kind: $r"
 done
 
-echo "== 5. Капча: неверный ответ и защита"
-curl -s -b "$J" "$BASE/admin/captcha?kind=quiz" > "$S"; cid=$(cid_of "$S")
+echo "== 6. Капча: ошибка, разбор и лимит попыток"
+curl -s -b "$A" "$BASE/admin/captcha?kind=quiz" > "$S"; cid=$(cid_of "$S")
 right=$(solve "$cid"); wrong=$(( (right + 1) % 4 ))
 r=$(curl -s -X POST "$BASE/api/captcha/$cid" -d "answer=$wrong")
 echo "$r" | grep -q '"ok":false' && ok "неверный ответ отклонён" || no "неверный принят: $r"
@@ -85,107 +90,123 @@ for i in 1 2 3; do curl -s -o /dev/null -X POST "$BASE/api/captcha/$cid" -d "ans
 r=$(curl -s -X POST "$BASE/api/captcha/$cid" --data-urlencode "answer=$right")
 echo "$r" | grep -q '"expired":true' && ok "после лимита попыток задание сгорает" || no "лимит попыток не сработал: $r"
 
-echo "== 6. Бронь без решённой капчи"
-curl -s "$BASE/book/$SLOT" > "$S"
-cid=$(grep -o 'name="captcha_id" value="[^"]*"' "$S" | cut -d'"' -f4)
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/book/$SLOT" \
-  --data-urlencode "full_name=Иванов Иван Иванович" --data-urlencode "group_name=КТ-24-04" \
-  --data-urlencode "captcha_id=$cid")
-[ "$code" = 422 ] && ok "без капчи бронь отклонена (422)" || no "без капчи: $code"
+PID=$(sql "select id from purpose where needs_comment = false order by sort_order limit 1")
+PID_C=$(sql "select id from purpose where needs_comment = true order by sort_order limit 1")
 
-book(){ # $1 slot, $2 ФИО, $3 группа → печатает "код|redirect"
-  curl -s "$BASE/book/$1" > "$S"
-  local cid pid
-  cid=$(grep -o 'name="captcha_id" value="[^"]*"' "$S" | cut -d'"' -f4)
-  pid=$(grep -oE 'name="purpose_id" value="[0-9]+"' "$S" | head -1 | grep -oE '[0-9]+')
+join(){ # jar, фамилия имя, группа, [цель], [комментарий]
+  local jar="$1" name="$2" grp="$3" purpose="${4:-$PID}" note="${5:-}"
+  curl -s -b "$jar" "$BASE/join" > "$S"
+  local cid; cid=$(grep -o 'name="captcha_id" value="[^"]*"' "$S" | cut -d'"' -f4)
   curl -s -o /dev/null -X POST "$BASE/api/captcha/$cid" --data-urlencode "answer=$(solve "$cid")"
-  curl -s -o /dev/null -w '%{http_code}|%{redirect_url}' -X POST "$BASE/book/$1" \
-    --data-urlencode "full_name=$2" --data-urlencode "group_name=$3" \
-    --data-urlencode "purpose_id=$pid" --data-urlencode "comment=лабораторная 4" \
-    --data-urlencode "captcha_id=$cid"; }
+  code -b "$jar" -c "$jar" -X POST "$BASE/join" \
+    --data-urlencode "full_name=$name" --data-urlencode "group_name=$grp" \
+    --data-urlencode "purpose_id=$purpose" --data-urlencode "comment=$note" \
+    --data-urlencode "captcha_id=$cid"
+}
 
-echo "== 7. Полная бронь"
-res=$(book "$SLOT" "иванов иван иванович" "кт-24-04")
-echo "$res" | grep -q '303|.*/b/' && ok "бронь создана, редирект на талон" || no "ответ: $res"
-TOKEN=$(echo "$res" | sed 's#.*/b/##; s#?.*##')
-curl -s "$BASE/b/$TOKEN" > "$S"
-grep -q "Иванов Иван Иванович" "$S" && ok "ФИО нормализовано в талоне" || no "ФИО не нормализовано"
-grep -q "КТ-24-04" "$S" && ok "группа приведена к верхнему регистру" || no "группа не нормализована"
-grep -q "Приносите отчёт" "$S" && ok "примечание дня в талоне" || no "примечания нет"
-
-echo "== 8. Слот занят, приватность соблюдена"
-curl -s "$BASE/d/$DATE" > "$S"
-grep -q "Занято" "$S" && ok "слот показан как «Занято»" || no "нет отметки «Занято»"
-grep -qi "иванов" "$S" && no "ФИО студента утекло в общую сетку!" || ok "ФИО в сетке не видно"
-[ "$(grep -c 'slot--free' "$S")" = 23 ] && ok "свободных стало 23" || no "свободных: $(grep -c 'slot--free' "$S")"
-code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/book/$SLOT")
-[ "$code" = 409 ] && ok "занятый слот отдаёт 409" || no "занятый слот: $code"
-
-echo "== 9. Лимит активных броней (ФИО в другом написании)"
-res=$(book "$SLOT2" "ИВАНОВ   иван иванович" "КТ-24-04")
-echo "$res" | grep -q '^409' && ok "второй слот тому же студенту отклонён" || no "лимит броней: $res"
-
-echo "== 10. Проверка формата группы"
-curl -s "$BASE/book/$SLOT2" > "$S"
+echo "== 7. Проверки формы"
+curl -s -b "$U1" "$BASE/join" > "$S"
 cid=$(grep -o 'name="captcha_id" value="[^"]*"' "$S" | cut -d'"' -f4)
-pid=$(grep -oE 'name="purpose_id" value="[0-9]+"' "$S" | head -1 | grep -oE '[0-9]+')
-curl -s -o /dev/null -X POST "$BASE/api/captcha/$cid" --data-urlencode "answer=$(solve "$cid")"
-curl -s -X POST "$BASE/book/$SLOT2" --data-urlencode "full_name=Петров Пётр Петрович" \
-  --data-urlencode "group_name=ИСП31" --data-urlencode "purpose_id=$pid" \
-  --data-urlencode "captcha_id=$cid" | grep -q "Формат номера группы" \
-  && ok "кривой номер группы отклонён" || no "кривой номер группы принят"
+c=$(code -X POST "$BASE/join" --data-urlencode "full_name=Иванов Иван" \
+  --data-urlencode "group_name=КТ-24-04" --data-urlencode "purpose_id=$PID" \
+  --data-urlencode "captcha_id=$cid")
+[ "$c" = 422 ] && ok "без решённой капчи не пускает" || no "капча не обязательна: $c"
+c=$(join "$U3" "Иванов" "КТ-24-04"); [ "$c" = 422 ] && ok "одна фамилия без имени не проходит" || no "имя не проверяется: $c"
+c=$(join "$U3" "Сидоров Пётр" "КТ2404"); [ "$c" = 422 ] && ok "кривая группа не проходит" || no "группа не проверяется: $c"
+c=$(join "$U3" "Сидоров Пётр" "КТ-24-04" "$PID_C" ""); [ "$c" = 422 ] && ok "цель с обязательным пояснением требует его" || no "пояснение не требуется: $c"
 
-echo "== 11. Другой студент занимает соседний слот"
-res=$(book "$SLOT2" "Петрова Анна Сергеевна" "АИ-23-04")
-echo "$res" | grep -q '^303' && ok "второй студент записался" || no "вторая бронь: $res"
+echo "== 8. Очередь набирается"
+c=$(join "$U1" "Иванов Иван" "КТ-24-04" "$PID" "лабораторная 4")
+[ "$c" = 303 ] && ok "первый студент записался" || no "запись вернула $c"
+n=$(sql "select number from queue_entry where full_name_key='иванов иван'")
+[ "$n" = 1 ] && ok "выдан номер 1" || no "номер первого: $n"
+c=$(join "$U2" "Петрова Анна" "АИ-23-04")
+n=$(sql "select number from queue_entry where full_name_key='петрова анна'")
+[ "$n" = 2 ] && ok "второму выдан номер 2" || no "номер второго: $n"
+c=$(join "$U3" "Иванов Иван" "КТ-24-04")
+[ "$c" = 422 ] && ok "повтор той же фамилии и группы отклонён" || no "дубль прошёл: $c"
+r=$(sql "insert into queue_entry (session_id, number, full_name, full_name_key, group_name, comment, status, token, added_by_admin, ip_hash)
+         values ($SID, 99, 'Иванов Иван', 'иванов иван', 'КТ-24-04', '', 'waiting', 'dubl-test', false, '')" 2>&1)
+echo "$r" | grep -q "uq_entry_active_person" && ok "дубль отклонён базой, а не только формой" || no "база пустила дубль: $r"
 
-echo "== 12. Выгрузки и печать"
-ct=$(curl -s -o "$S.xlsx" -w '%{content_type}' -b "$J" "$BASE/admin/days/$DAYID/export.xlsx")
-echo "$ct" | grep -q spreadsheetml && ok "XLSX отдаётся" || no "XLSX: $ct"
-python3 - "$S.xlsx" <<'PY' && ok "XLSX читается, данные на месте" || no "XLSX не читается"
+echo "== 9. Имена видны всем"
+curl -s "$BASE/" > "$S"
+grep -q "Иванов Иван" "$S" && ok "фамилия первого видна без кук" || no "имена не показываются"
+grep -q "Петрова Анна" "$S" && ok "фамилия второго видна" || no "второго не видно"
+grep -q "АИ-23-04" "$S" && ok "группа видна" || no "группы не видно"
+grep -q "лабораторная 4" "$S" && no "комментарий утёк в общий список!" || ok "комментарий чужим не показан"
+
+echo "== 10. Свой номерок"
+curl -s -b "$U2" "$BASE/" > "$S"
+grep -q "Ваш номер" "$S" && ok "свой номер показан" || no "нет блока «Ваш номер»"
+grep -q "Перед вами: 1 человек" "$S" && ok "склонение «1 человек» верное" || no "не та фраза о числе впереди"
+r=$(curl -s -b "$U2" "$BASE/api/queue")
+echo "$r" | grep -q '"waiting": *2' && ok "api отдаёт 2 ожидающих" || no "api: $r"
+echo "$r" | grep -q '"mine": *2' && ok "api знает мой номер" || no "api не видит мою запись"
+
+echo "== 11. Выход из очереди"
+c=$(code -b "$U2" -X POST "$BASE/leave"); [ "$c" = 303 ] && ok "выход принят" || no "выход вернул $c"
+st=$(sql "select status from queue_entry where full_name_key='петрова анна'")
+[ "$st" = "left" ] && ok "статус «ушёл» проставлен" || no "статус после выхода: $st"
+n=$(sql "select count(*) from queue_entry where session_id=$SID and status='waiting'")
+[ "$n" = 1 ] && ok "в очереди остался один" || no "ожидающих: $n"
+
+echo "== 12. Отметки преподавателя"
+EID=$(sql "select id from queue_entry where full_name_key='иванов иван'")
+c=$(code -b "$A" -X POST "$BASE/admin/entries/$EID/status" -d "status=done" -d "back=/admin")
+[ "$c" = 303 ] && ok "отметка «принят» принята" || no "отметка вернула $c"
+st=$(sql "select status from queue_entry where id=$EID")
+[ "$st" = "done" ] && ok "статус в базе — принят" || no "статус: $st"
+curl -s -b "$U1" "$BASE/" | grep -q "приём состоялся" && ok "студент видит, что его приняли" || no "студенту не видно отметки"
+
+echo "== 13. Запись вручную"
+c=$(code -b "$A" -X POST "$BASE/admin/entries" \
+  --data-urlencode "full_name=Кузнецов Олег" --data-urlencode "group_name=КС-23-04" \
+  --data-urlencode "purpose_id=$PID")
+[ "$c" = 303 ] && ok "ручная запись создана" || no "ручная запись: $c"
+n=$(sql "select number from queue_entry where full_name_key='кузнецов олег'")
+[ "$n" = 3 ] && ok "ей достался номер 3" || no "номер ручной записи: $n"
+
+echo "== 14. Выгрузки и печать"
+curl -s -b "$A" "$BASE/admin/sessions/$SID/export.xlsx" -o "$S"
+head -c2 "$S" | grep -q "PK" && ok "xlsx — настоящий zip" || no "xlsx не похож на zip"
+python3 - "$S" <<'PY' && ok "в xlsx есть фамилия" || no "xlsx без фамилии"
 import sys, zipfile
 z = zipfile.ZipFile(sys.argv[1])
-assert z.testzip() is None, 'битый архив'
-blob = "".join(z.read(n).decode('utf-8', 'replace') for n in z.namelist())
-for needle in ('Иванов Иван Иванович', 'КТ-24-04', 'Петрова', 'лабораторная 4'):
-    assert needle in blob, f'нет строки: {needle}'
+blob = b"".join(z.read(n) for n in z.namelist() if n.endswith(".xml"))
+sys.exit(0 if "Иванов Иван".encode() in blob else 1)
 PY
-curl -s -b "$J" "$BASE/admin/days/$DAYID/export.csv" > "$S.csv"
-head -c3 "$S.csv" | grep -q $'\xef\xbb\xbf' && ok "CSV с BOM (Excel не сломает кириллицу)" || no "CSV без BOM"
-grep -q "Иванов Иван Иванович" "$S.csv" && ok "CSV содержит записи" || no "CSV пустой"
-curl -s -b "$J" "$BASE/admin/days/$DAYID/print" > "$S"
-grep -q "Подпись преподавателя" "$S" && ok "печатная форма готова" || no "печатная форма не собралась"
-grep -q "Иванов Иван Иванович" "$S" && ok "в печати есть студенты" || no "печать без студентов"
+curl -s -b "$A" "$BASE/admin/sessions/$SID/export.csv" -o "$S"
+head -c3 "$S" | od -An -tx1 | grep -q "ef bb bf" && ok "csv с BOM для Excel" || no "csv без BOM"
+grep -q "Кузнецов Олег" "$S" && ok "в csv есть ручная запись" || no "csv без ручной записи"
+c=$(code -b "$A" "$BASE/admin/sessions/$SID/print")
+[ "$c" = 200 ] && ok "печатная форма открывается" || no "печать вернула $c"
 
-echo "== 13. Статусы"
-BID=$(sql "select id from booking where cancel_token='$TOKEN'")
-curl -s -o /dev/null -b "$J" -X POST "$BASE/admin/bookings/$BID/status" -d "status=done" -d "back=/admin"
-st=$(sql "select status from booking where id=$BID")
-[ "$st" = "done" ] && ok "статус «Принят» сохранён в БД" || no "статус в БД: $st"
-curl -s -o /dev/null -X POST "$BASE/b/$TOKEN/cancel"
-st=$(sql "select status from booking where id=$BID")
-[ "$st" = "done" ] && ok "принятую бронь студент уже не отменит" || no "статус после отмены: $st"
+echo "== 15. QR-код"
+curl -s -b "$A" "$BASE/admin/qr" > "$S"
+grep -q "<svg" "$S" && ok "qr отрисован в svg" || no "нет svg с кодом"
+grep -q "/q" "$S" && ok "код ведёт на /q" || no "в коде нет адреса /q"
+c=$(code "$BASE/q"); [ "$c" = 307 ] && ok "/q ведёт на очередь" || no "/q вернул $c"
 
-echo "== 14. Отмена студентом освобождает слот"
-BID2=$(sql "select b.id from booking b where b.slot_id=$SLOT2")
-TOK2=$(sql "select cancel_token from booking where id=$BID2")
-curl -s -o /dev/null -X POST "$BASE/b/$TOK2/cancel"
-st=$(sql "select status from booking where id=$BID2")
-[ "$st" = "cancelled" ] && ok "бронь отменена" || no "статус: $st"
-[ "$(curl -s "$BASE/d/$DATE" | grep -c 'slot--free')" = 23 ] && ok "слот вернулся в свободные" || no "слот не освободился"
+echo "== 16. Закрытие приёма"
+c=$(code -b "$A" -X POST "$BASE/admin/session/close")
+[ "$c" = 303 ] && ok "приём закрыт" || no "закрытие вернуло $c"
+n=$(sql "select count(*) from queue_session where closed_at is null")
+[ "$n" = 0 ] && ok "открытых приёмов не осталось" || no "открытых сеансов: $n"
+curl -s "$BASE/" | grep -q "Сейчас приёма нет" && ok "студент снова видит «приёма нет»" || no "страница не обновилась"
+c=$(code "$BASE/join"); [ "$c" = 303 ] && ok "после закрытия встать нельзя" || no "/join после закрытия: $c"
 
-echo "== 15. Двойная бронь на уровне БД"
-r=$(sql "insert into booking (slot_id, full_name, full_name_key, group_name, comment, status, cancel_token, ip_hash)
-         values ($SLOT,'Хакер Х.','хакер х.','КС-23-04','','booked','dup-token-test','')" 2>&1)
-echo "$r" | grep -q "uq_booking_active_slot" && ok "БД не дала второй активной брони на слот" || no "индекс не сработал: $r"
-
-echo "== 16. Защита закрытых слотов"
-curl -s -o /dev/null -b "$J" -X POST "$BASE/admin/slots/$SLOT2/toggle"
-curl -s -o /dev/null -b "$J" -X POST "$BASE/admin/slots/$SLOT2/toggle" -w '' # вернём обратно позже
-blocked=$(sql "select is_blocked from slot where id=$SLOT2")
-ok "переключение блокировки слота отработало (is_blocked=$blocked)"
+echo "== 17. История"
+curl -s -b "$A" "$BASE/admin/sessions" | grep -q "1215" && ok "приём виден в истории" || no "истории нет"
+curl -s -b "$A" "$BASE/admin/sessions/$SID" | grep -q "Иванов Иван" && ok "список приёма сохранился" || no "список потерян"
+curl -s -b "$A" --get --data-urlencode "q=Иванов" "$BASE/admin/entries" | grep -q "Иванов Иван" \
+  && ok "поиск по записям работает" || no "поиск не нашёл"
+curl -s -b "$A" --get --data-urlencode "group=АИ-23-04" "$BASE/admin/entries" | grep -q "Петрова Анна" \
+  && ok "фильтр по группе работает" || no "фильтр по группе не сработал"
+n=$(sql "select count(*) from queue_entry where session_id=$SID")
+[ "$n" = 3 ] && ok "все три записи на месте" || no "записей в истории: $n"
 
 echo
-echo "Итог: успешно $pass, провалено $fail"
-rm -f "$J" "$S" "$S.xlsx" "$S.csv"
-exit $((fail > 0))
+echo "Итог: $pass ок, $fail провалов"
+rm -f "$A" "$U1" "$U2" "$U3" "$S"
+[ "$fail" = 0 ]

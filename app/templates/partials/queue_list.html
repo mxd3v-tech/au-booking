@@ -1,0 +1,23 @@
+{% if entries %}
+<div class="qlist">
+  {% for entry in entries %}
+  {% set is_mine = mine and entry.id == mine.id %}
+  <div class="qline{% if is_mine %} qline--mine{% endif %}{% if entry.status.value == 'done' %} qline--done{% elif entry.status.value in ('no_show', 'left') %} qline--gone{% endif %}">
+    <div class="qline__num">{{ entry.number }}</div>
+    <div class="qline__body">
+      <div class="qline__name">{{ entry.full_name }}{% if is_mine %} <span class="badge badge--free">это вы</span>{% endif %}</div>
+      <div class="qline__meta">
+        <span class="mono">{{ entry.group_name }}</span>
+        {% if entry.status.value != 'waiting' %} · {{ entry.status | status_label }}{% endif %}
+      </div>
+    </div>
+    {% if entry.status.value == 'done' %}<span class="qline__mark" aria-hidden="true">&check;</span>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  <div class="empty__title">В очереди пока никого</div>
+  <p class="muted" style="margin:0 auto">Будете первым — это лучшее место в списке.</p>
+</div>
+{% endif %}

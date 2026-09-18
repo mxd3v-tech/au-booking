@@ -1,27 +1,27 @@
 {% extends "base.html" %}
-{% block title %}Запись на {{ starts_at | hm }}{% endblock %}
+{% block title %}Встать в очередь{% endblock %}
 
 {% block content %}
 
-<p><a href="/d/{{ day.date.isoformat() }}" class="muted">← К сетке времени</a></p>
+<p><a href="/" class="muted">← К очереди</a></p>
 
 <div class="card card--soft" style="margin-bottom:var(--space-6)">
-  <div class="card__eyebrow" style="text-transform:none">{{ day.date | dfull }}</div>
-  <div class="card__title" style="font-family:var(--font-mono);font-size:var(--text-30)">
-    {{ starts_at | hm }}–{{ ends_at | hm }}
+  <div class="card__eyebrow">Приём идёт</div>
+  <div class="card__title">
+    {%- if session.room %}Кабинет {{ session.room }}{% else %}Живая очередь{% endif -%}
   </div>
   <p class="card__meta" style="margin:0">
-    {% if day.room %}Кабинет {{ day.room }} · {% endif %}
-    Слот держится за вами до конца заполнения формы — но не бесконечно.
+    {%- if session.time_label %}{{ session.time_label }} · {% endif -%}
+    Номер выдаётся сразу после отправки формы.
   </p>
 </div>
 
-<h1>Запись на приём</h1>
+<h1>Встать в очередь</h1>
 
-{% if errors.slot %}
+{% if errors.queue %}
 <div class="callout callout--err">
-  <div class="callout__title">Слот уже занят</div>
-  <p style="margin:0;font-size:var(--text-14)">{{ errors.slot }}</p>
+  <div class="callout__title">Не получилось</div>
+  <p style="margin:0;font-size:var(--text-14)">{{ errors.queue }}</p>
 </div>
 {% endif %}
 
@@ -30,21 +30,25 @@
     <div class="callout__title">Нужен JavaScript</div>
     <p style="margin:0;font-size:var(--text-14)">
       Задание-проверка работает только со скриптами. Включите JavaScript
-      или подойдите лично — второй вариант всегда быстрее.
+      или подойдите и попросите вписать вас вручную.
     </p>
   </div>
 </noscript>
 
-<form method="post" action="/book/{{ slot.id }}" data-booking-form novalidate>
+<form method="post" action="/join" novalidate>
   <input type="hidden" name="captcha_id" value="{{ challenge.id }}" data-captcha-input>
 
   <div class="field">
-    <label class="field__label" for="full_name">Фамилия, имя и отчество</label>
+    <label class="field__label" for="full_name">Фамилия и имя</label>
     <input class="input {% if errors.full_name %}is-error{% endif %}" type="text" id="full_name"
            name="full_name" value="{{ values.full_name or '' }}"
-           placeholder="Иванов Иван Иванович" autocomplete="name" required
+           placeholder="Иванов Иван" autocomplete="name" required
            maxlength="160" autocapitalize="words">
-    {% if errors.full_name %}<div class="field__error">{{ errors.full_name }}</div>{% endif %}
+    {% if errors.full_name %}
+      <div class="field__error">{{ errors.full_name }}</div>
+    {% else %}
+      <div class="field__hint">Отчество не нужно — в очереди оно только мешает</div>
+    {% endif %}
   </div>
 
   <div class="field">
@@ -102,13 +106,13 @@
   </div>
 
   <button type="submit" class="btn btn--primary btn--lg btn--block is-disabled"
-          data-booking-submit disabled>
-    Решите задание, чтобы записаться
+          data-join-submit disabled>
+    Решите задание, чтобы встать в очередь
   </button>
 
   <p class="field__hint" style="margin-top:var(--space-4)">
-    Записываясь, вы соглашаетесь, что ваши ФИО и группа увидит преподаватель.
-    Другим студентам они не показываются — в сетке времени видно только «Занято».
+    Фамилию, имя и группу увидят все, кто стоит в этой очереди, — так работает живая очередь.
+    Цель визита и комментарий видит только {{ teacher_name }}.
   </p>
 </form>
 

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1">
 <script src="/static/js/theme.js"></script>
 <title>{% block title %}{{ site_title }}{% endblock %} — {{ teacher_name }}</title>
-<meta name="description" content="{% block description %}Запись в очередь на приём к преподавателю {{ teacher_name }}{% endblock %}">
+<meta name="description" content="{% block description %}Живая очередь на приём: {{ teacher_name }}{% endblock %}">
 <meta name="robots" content="noindex, nofollow">
 <link rel="icon" href="/static/img/logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/css/app.css">
@@ -24,7 +24,7 @@
     </a>
     <nav class="site-header__nav" aria-label="Основная навигация">
       {% block nav %}
-      <a href="/">Расписание</a>
+      <a href="/">Очередь</a>
       {% endblock %}
       <button type="button" class="captcha__reload" data-theme-toggle aria-label="Сменить тему">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -54,21 +54,21 @@
       <div>
         <h4>Студентам</h4>
         <ul>
-          <li><a href="/">Расписание приёма</a></li>
-          <li><a href="/#my">Моя запись</a></li>
+          <li><a href="/">Очередь сейчас</a></li>
+          <li><a href="/#my">Мой номер</a></li>
           <li><a href="/#rules">Как это работает</a></li>
         </ul>
       </div>
       <div>
         <h4>Служебное</h4>
         <ul>
-          <li><a href="/admin">Панель преподавателя</a></li>
+          <li><a href="/admin">Панель приёма</a></li>
         </ul>
       </div>
     </div>
     <div class="site-footer__bottom">
       <div>© {{ current_year() }} {{ teacher_name }}</div>
-      <div>Приём по записи · слоты по расписанию</div>
+      <div>Живая очередь · без записи на время</div>
     </div>
   </div>
 </footer>

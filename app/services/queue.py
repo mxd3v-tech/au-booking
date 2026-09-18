@@ -1,0 +1,254 @@
+"""Живая очередь: сеанс приёма, номерки, статусы."""
+from __future__ import annotations
+
+import datetime as dt
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, selectinload
+
+from app.config import settings
+from app.models import EntryStatus, QueueEntry, QueueSession
+
+WEEKDAYS = [
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+]
+MONTHS_GEN = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
+
+
+def now_local() -> dt.datetime:
+    return dt.datetime.now(settings.tz)
+
+
+def today_local() -> dt.date:
+    return now_local().date()
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def format_date(value: dt.date) -> str:
+    return f"{value.day} {MONTHS_GEN[value.month - 1]}"
+
+
+def format_date_full(value: dt.date) -> str:
+    return f"{WEEKDAYS[value.weekday()]}, {value.day} {MONTHS_GEN[value.month - 1]} {value.year}"
+
+
+def to_local(value: dt.datetime) -> dt.datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(settings.tz)
+
+
+class QueueError(Exception):
+    """Действие не выполнено — с человеческим объяснением."""
+
+
+def _violates(exc: IntegrityError, constraint: str) -> bool:
+    """Какое именно ограничение не пустило запись."""
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    if diag is not None and getattr(diag, "constraint_name", None):
+        return diag.constraint_name == constraint
+    return constraint in str(exc)  # драйвер не дал подробностей — ищем в тексте
+
+
+# ── Сеанс приёма ────────────────────────────────────────────────────────
+
+def current_session(db: Session) -> QueueSession | None:
+    """Открытый сеанс. Он всегда один — за этим следит уникальный индекс."""
+    return db.scalar(select(QueueSession).where(QueueSession.closed_at.is_(None)))
+
+
+def open_session(
+    db: Session,
+    *,
+    room: str,
+    time_from: dt.time | None,
+    time_to: dt.time | None,
+    note: str,
+) -> QueueSession:
+    session = QueueSession(
+        room=room.strip()[:64],
+        time_from=time_from,
+        time_to=time_to,
+        note=note.strip(),
+    )
+    db.add(session)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise QueueError(
+            "Приём уже открыт. Закройте текущий — и открывайте новый."
+        ) from exc
+    db.refresh(session)
+    return session
+
+
+def close_session(db: Session, session: QueueSession) -> int:
+    """Закрыть приём. Возвращает, сколько человек так и не дождалось."""
+    left_waiting = sum(1 for e in session.entries if e.is_waiting)
+    session.closed_at = utc_now()
+    db.commit()
+    return left_waiting
+
+
+def session_by_id(db: Session, session_id: int) -> QueueSession | None:
+    return db.scalar(
+        select(QueueSession)
+        .options(selectinload(QueueSession.entries).selectinload(QueueEntry.purpose))
+        .where(QueueSession.id == session_id)
+    )
+
+
+def past_sessions(db: Session, limit: int = 200) -> list[tuple[QueueSession, int, int]]:
+    """История: сеанс, сколько всего записалось, сколько принято."""
+    rows = db.execute(
+        select(
+            QueueSession,
+            func.count(QueueEntry.id),
+            func.count(QueueEntry.id).filter(QueueEntry.status == EntryStatus.done),
+        )
+        .outerjoin(QueueEntry, QueueEntry.session_id == QueueSession.id)
+        .group_by(QueueSession.id)
+        .order_by(QueueSession.opened_at.desc())
+        .limit(limit)
+    ).all()
+    return [(row[0], row[1], row[2]) for row in rows]
+
+
+# ── Записи ──────────────────────────────────────────────────────────────
+
+def entries_of(db: Session, session_id: int) -> list[QueueEntry]:
+    return list(
+        db.scalars(
+            select(QueueEntry)
+            .options(selectinload(QueueEntry.purpose))
+            .where(QueueEntry.session_id == session_id)
+            .order_by(QueueEntry.number)
+        ).all()
+    )
+
+
+def waiting_before(entries: list[QueueEntry], entry: QueueEntry) -> int:
+    """Сколько человек ещё ждёт впереди."""
+    return sum(1 for e in entries if e.is_waiting and e.number < entry.number)
+
+
+def join_queue(
+    db: Session,
+    *,
+    session: QueueSession,
+    full_name: str,
+    full_name_key: str,
+    group_name: str,
+    purpose_id: int | None,
+    comment: str,
+    token: str,
+    ip_hash: str = "",
+    added_by_admin: bool = False,
+) -> QueueEntry:
+    """Встать в очередь. Номер выдаётся следующим по порядку.
+
+    Если два человека нажали кнопку в одну и ту же секунду, второму
+    достанется тот же номер — база это отклонит, и мы просто берём
+    следующий. Отсюда цикл, а не одна попытка.
+    """
+    last_error: IntegrityError | None = None
+
+    for _ in range(5):
+        number = (
+            db.scalar(
+                select(func.max(QueueEntry.number)).where(
+                    QueueEntry.session_id == session.id
+                )
+            )
+            or 0
+        ) + 1
+
+        entry = QueueEntry(
+            session_id=session.id,
+            number=number,
+            full_name=full_name,
+            full_name_key=full_name_key,
+            group_name=group_name,
+            purpose_id=purpose_id,
+            comment=comment,
+            token=token,
+            ip_hash=ip_hash,
+            added_by_admin=added_by_admin,
+        )
+        db.add(entry)
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            if _violates(exc, "uq_entry_active_person"):
+                raise QueueError(
+                    f"{full_name} из группы {group_name} уже стоит в этой очереди. "
+                    "Дважды занимать место нечестно по отношению к тем, кто ждёт."
+                ) from exc
+            last_error = exc
+            continue
+        db.refresh(entry)
+        return entry
+
+    raise QueueError(
+        "Очередь в этот момент трогали сразу несколько человек. "
+        "Нажмите «Встать в очередь» ещё раз."
+    ) from last_error
+
+
+def entry_by_token(db: Session, token: str) -> QueueEntry | None:
+    if not token:
+        return None
+    return db.scalar(
+        select(QueueEntry)
+        .options(
+            selectinload(QueueEntry.purpose),
+            selectinload(QueueEntry.session),
+        )
+        .where(QueueEntry.token == token)
+    )
+
+
+def set_status(db: Session, entry: QueueEntry, status: EntryStatus) -> None:
+    entry.status = status
+    entry.closed_at = None if status is EntryStatus.waiting else utc_now()
+    db.commit()
+
+
+def known_groups(db: Session, limit: int = 60) -> list[str]:
+    rows = db.execute(
+        select(QueueEntry.group_name, func.count(QueueEntry.id))
+        .group_by(QueueEntry.group_name)
+        .order_by(func.count(QueueEntry.id).desc())
+        .limit(limit)
+    ).all()
+    return [row[0] for row in rows]
+
+
+def counters(entries: list[QueueEntry]) -> dict[str, int]:
+    return {
+        "total": len(entries),
+        "waiting": sum(1 for e in entries if e.status is EntryStatus.waiting),
+        "done": sum(1 for e in entries if e.status is EntryStatus.done),
+        "no_show": sum(1 for e in entries if e.status is EntryStatus.no_show),
+        "left": sum(1 for e in entries if e.status is EntryStatus.left),
+    }
+
+
+def session_title(session: QueueSession) -> str:
+    opened = to_local(session.opened_at)
+    return f"Приём {format_date_full(opened.date())}, с {opened:%H:%M}"

@@ -14,15 +14,14 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from app.config import settings
 
 ADMIN_COOKIE = "au_admin"
-BOOKINGS_COOKIE = "au_bookings"
+ENTRY_COOKIE = "au_entry"
 ADMIN_SESSION_MAX_AGE = 12 * 60 * 60  # 12 часов
-BOOKINGS_COOKIE_MAX_AGE = 60 * 60 * 24 * 120
-MAX_REMEMBERED_BOOKINGS = 12
+ENTRY_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 _serializer = URLSafeTimedSerializer(settings.secret_key, salt="au-queue")
 
 _SPACES = re.compile(r"\s+")
-_NAME_ALLOWED = re.compile(r"^[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\-'` .]{4,159}$")
+_NAME_ALLOWED = re.compile(r"^[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\-' ]{2,159}$")
 _GROUP_RE = re.compile(settings.group_pattern)
 
 
@@ -65,24 +64,25 @@ def require_admin(request: Request) -> bool:
     return True
 
 
-# ── Брони студента в этом браузере ──────────────────────────────────────
+# ── Своя запись в этом браузере ─────────────────────────────────────────
 
-def read_remembered(request: Request) -> list[str]:
-    raw = request.cookies.get(BOOKINGS_COOKIE)
+def read_entry_token(request: Request) -> str:
+    """Токен записи, которую этот телефон поставил в очередь."""
+    raw = request.cookies.get(ENTRY_COOKIE)
     if not raw:
-        return []
+        return ""
     try:
-        data = _serializer.loads(raw, max_age=BOOKINGS_COOKIE_MAX_AGE)
+        token = _serializer.loads(raw, max_age=ENTRY_COOKIE_MAX_AGE)
     except (BadSignature, SignatureExpired):
-        return []
-    return [str(t) for t in data][:MAX_REMEMBERED_BOOKINGS] if isinstance(data, list) else []
+        return ""
+    return str(token) if isinstance(token, str) else ""
 
 
-def write_remembered(tokens: list[str]) -> str:
-    return _serializer.dumps(tokens[-MAX_REMEMBERED_BOOKINGS:])
+def write_entry_token(token: str) -> str:
+    return _serializer.dumps(token)
 
 
-def new_cancel_token() -> str:
+def new_entry_token() -> str:
     return secrets.token_urlsafe(24)
 
 
@@ -113,12 +113,15 @@ def name_key(raw: str) -> str:
 
 
 def validate_full_name(name: str) -> str | None:
-    if len(name) < 5:
-        return "Укажите фамилию, имя и отчество полностью."
-    if len(name.split(" ")) < 2:
-        return "Нужно как минимум фамилия и имя."
+    parts = [p for p in name.split(" ") if p]
+    if len(parts) < 2:
+        return "Нужны фамилия и имя. Отчество писать не надо."
+    if len(parts) > 3:
+        return "Слишком много слов — достаточно фамилии и имени."
+    if any(len(part) < 2 for part in parts):
+        return "Имя и фамилию пишем целиком, не инициалами."
     if not _NAME_ALLOWED.match(name):
-        return "В ФИО допустимы только буквы, пробел и дефис."
+        return "В имени допустимы только буквы, пробел и дефис."
     return None
 
 

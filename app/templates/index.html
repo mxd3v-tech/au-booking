@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Расписание приёма{% endblock %}
+{% block title %}Очередь{% endblock %}
+{% block description %}Живая очередь на приём: {{ teacher_name }}{% endblock %}
 
 {% block hero %}
 <section class="hero">
@@ -7,8 +8,8 @@
     <div class="hero__eyebrow">{{ teacher_title }}</div>
     <h1>{{ teacher_name }}</h1>
     <p class="hero__lead">
-      Приём по записи. Один разговор — около пяти минут, поэтому время лучше занять заранее,
-      чем стоять в коридоре и гадать, кто последний.
+      Живая очередь. Отсканировали код — встали в список, и видно, кто за кем.
+      Никаких «вы тут не стояли».
     </p>
   </div>
 </section>
@@ -16,89 +17,128 @@
 
 {% block content %}
 
-{% if my_bookings %}
+<div class="status-bar{% if session %} status-bar--open{% endif %}" data-queue-status>
+  <span class="status-bar__dot" aria-hidden="true"></span>
+  {% if session %}
+  <span class="status-bar__text">Приём идёт</span>
+  <span class="status-bar__meta">
+    {%- if session.room %}каб. {{ session.room }} · {% endif -%}
+    {# время приёма задано в админке; не задано — показываем, когда открыли #}
+    {{ session.time_label or 'с ' ~ (session.opened_at | hm) }}
+  </span>
+  {% else %}
+  <span class="status-bar__text">Сейчас приёма нет</span>
+  <span class="status-bar__meta">Отсканируйте код ещё раз, когда приём откроется</span>
+  {% endif %}
+</div>
+
+{% if session %}
+
+{% if session.note %}
+<div class="callout">
+  <div class="callout__title">От {{ teacher_name }}</div>
+  <p style="margin:0;font-size:var(--text-14)">{{ session.note }}</p>
+</div>
+{% endif %}
+
+{% if mine and mine.is_waiting %}
 <section class="section" id="my">
-  <h2>Ваша запись</h2>
-  {% for booking in my_bookings %}
-  <div class="card card--hover" style="margin-bottom:var(--space-3)">
-    <div class="card__eyebrow">{{ booking.slot.day.date | dfull }}</div>
-    <div class="card__title">
-      {{ booking.slot.starts_at | hm }}–{{ booking.slot.ends_at | hm }}
-      {% if booking.slot.day.room %}· каб. {{ booking.slot.day.room }}{% endif %}
+  <div class="myturn">
+    <div class="myturn__label">Ваш номер</div>
+    <div class="myturn__num">{{ mine.number }}</div>
+    <div class="myturn__ahead" data-ahead>
+      {%- if ahead == 0 %}Вы следующий{% else %}Перед вами: {{ ahead | people }}{% endif -%}
     </div>
-    <p class="card__meta">{{ booking.full_name }} · {{ booking.group_name }}{% if booking.purpose %} · {{ booking.purpose.title }}{% endif %}</p>
-    <div class="btn-row" style="margin-top:var(--space-4)">
-      <a class="btn btn--ghost btn--sm" href="/b/{{ booking.cancel_token }}">Открыть талон</a>
-    </div>
+    <div class="myturn__meta">{{ mine.full_name }} · {{ mine.group_name }}</div>
   </div>
-  {% endfor %}
+  <div class="btn-row" style="margin-top:var(--space-4)">
+    <form method="post" action="/leave" class="inline-form"
+          data-confirm="Выйти из очереди? Место освободится, а вернуться можно будет только в конец списка.">
+      <button type="submit" class="btn btn--ghost">Выйти из очереди</button>
+    </form>
+  </div>
 </section>
+
+{% elif mine %}
+<section class="section" id="my">
+  {% if mine.status.value == 'done' %}
+  <div class="callout callout--ok">
+    <div class="callout__title">Вы были под номером {{ mine.number }} — приём состоялся</div>
+    <p style="margin:0;font-size:var(--text-14)">Вопрос закрыт. Понадобится ещё раз — встаньте в очередь заново.</p>
+  </div>
+  {% elif mine.status.value == 'no_show' %}
+  <div class="callout callout--warn">
+    <div class="callout__title">Номер {{ mine.number }} не подошёл</div>
+    <p style="margin:0;font-size:var(--text-14)">Когда дошла очередь, вас не нашли. Можно встать заново — уже в конец.</p>
+  </div>
+  {% else %}
+  <div class="callout">
+    <div class="callout__title">Вы вышли из очереди</div>
+    <p style="margin:0;font-size:var(--text-14)">Место освободилось. Передумали — вставайте заново.</p>
+  </div>
+  {% endif %}
+  <a class="btn btn--primary btn--lg btn--block" href="/join">Встать в очередь снова</a>
+</section>
+
+{% else %}
+<a class="btn btn--primary btn--lg btn--block" href="/join">Встать в очередь</a>
+<p class="field__hint" style="margin-top:var(--space-3);text-align:center">
+  Фамилия, имя, группа и короткое задание про сети — секунд двадцать.
+</p>
 {% endif %}
 
 <section class="section">
-  <h2>Ближайшие дни приёма</h2>
-
-  {% if days %}
-  <div class="grid grid--2">
-    {% for summary in days %}
-    <a class="card card--hover day-card" href="/d/{{ summary.day.date.isoformat() }}">
-      <div>
-        <div class="day-card__date">{{ summary.day.date | dshort }}</div>
-        <div class="day-card__weekday">{{ summary.day.date | dfull }}</div>
-      </div>
-      {% if summary.day.room %}<div class="card__meta">Кабинет {{ summary.day.room }}</div>{% endif %}
-      {% if summary.day.note %}<div class="card__meta">{{ summary.day.note }}</div>{% endif %}
-      <div class="day-card__meter" aria-hidden="true">
-        <span style="width: {{ (100 * summary.taken / summary.total) | round | int }}%"></span>
-      </div>
-      <div>
-        {% if summary.has_free %}
-          <span class="badge badge--free">Свободно: {{ summary.free }}</span>
-        {% else %}
-          <span class="badge badge--busy">Все слоты заняты</span>
-        {% endif %}
-        <span class="badge">Всего {{ summary.total }}</span>
-      </div>
-    </a>
-    {% endfor %}
+  <h2>
+    Очередь
+    <span class="badge badge--free" data-waiting-badge>ждут: {{ counters.waiting }}</span>
+  </h2>
+  <div data-queue-list data-poll="{{ settings.poll_seconds }}"
+       data-mine-status="{{ mine.status.value if mine else '' }}">
+    {% include "partials/queue_list.html" %}
   </div>
-  {% else %}
-  <div class="empty">
-    <div class="empty__title">Дни приёма пока не назначены</div>
-    <p class="muted" style="margin:0 auto">
-      Расписание появится здесь, как только преподаватель откроет ближайшее окно.
-      Зайдите позже или спросите на паре.
-    </p>
-  </div>
-  {% endif %}
+  <p class="field__hint" style="margin-top:var(--space-4)">
+    Список обновляется сам, раз в {{ settings.poll_seconds }} секунд — страницу перезагружать не нужно.
+  </p>
 </section>
+
+{% else %}
+
+<div class="empty">
+  <div class="empty__title">Приём закрыт</div>
+  <p class="muted" style="margin:0 auto">
+    Очередь появится здесь, как только приём откроют.
+    Страница сама это заметит — можно не обновлять.
+  </p>
+</div>
+
+{% endif %}
 
 <section class="section" id="rules">
   <h2>Как это работает</h2>
   <div class="grid grid--3">
     <div class="card card--soft">
       <div class="card__eyebrow">Шаг 1</div>
-      <div class="card__title">Выберите время</div>
-      <p class="card__meta">Открытые слоты подсвечены зелёным. Один слот — один разговор на несколько минут.</p>
+      <div class="card__title">Сканируете код</div>
+      <p class="card__meta">QR висит у кабинета. Ведёт на эту страницу — можно и просто открыть её в браузере.</p>
     </div>
     <div class="card card--soft">
       <div class="card__eyebrow">Шаг 2</div>
-      <div class="card__title">Заполните форму</div>
-      <p class="card__meta">ФИО, группа в формате {{ group_placeholder }} и короткое задание про сети — вместо скучной капчи.</p>
+      <div class="card__title">Встаёте в очередь</div>
+      <p class="card__meta">Фамилия и имя, группа в формате {{ group_placeholder }} и короткое задание про сети — вместо скучной капчи.</p>
     </div>
     <div class="card card--soft">
       <div class="card__eyebrow">Шаг 3</div>
-      <div class="card__title">Сохраните талон</div>
-      <p class="card__meta">Ссылка на талон останется в этом браузере. По ней же можно отменить запись, если планы изменились.</p>
+      <div class="card__title">Ждёте свой номер</div>
+      <p class="card__meta">Список на экране живой. Видно, сколько человек впереди и кто уже прошёл.</p>
     </div>
   </div>
 
   <div class="callout" style="margin-top:var(--space-5)">
     <div class="callout__title">Короткие правила</div>
     <p class="card__meta" style="margin:0">
-      Активных записей — не больше {{ settings.max_active_bookings }}.
-      Запись на слот закрывается за {{ settings.booking_lead_minutes }} мин до его начала.
-      Передумали — отмените бронь, её тут же займёт кто-то из группы.
+      Одна запись на человека: дважды занять место не выйдет.
+      Передумали или ушли — нажмите «Выйти из очереди», чтобы не держать номер зря.
+      Фамилию и группу видят все, кто стоит в этой же очереди.
     </p>
   </div>
 </section>
