@@ -72,6 +72,7 @@ def _remember(response: Response, request: Request, token: str) -> None:
         write_remembered(tokens),
         max_age=BOOKINGS_COOKIE_MAX_AGE,
         httponly=True,
+        secure=settings.cookie_secure,
         samesite="lax",
         path="/",
     )

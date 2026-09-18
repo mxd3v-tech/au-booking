@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.captcha import KINDS, issue_challenge
+from app.config import settings
 from app.db import get_db
 from app.models import (
     Booking,
@@ -73,6 +74,7 @@ def login_submit(request: Request, username: str = Form(""), password: str = For
         make_admin_token(),
         max_age=ADMIN_SESSION_MAX_AGE,
         httponly=True,
+        secure=settings.cookie_secure,
         samesite="lax",
         path="/",
     )

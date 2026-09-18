@@ -56,7 +56,7 @@
 
 <div class="btn-row no-print" style="margin-top:var(--space-6)">
   <a class="btn btn--ghost" href="/">На главную</a>
-  <button type="button" class="btn btn--ghost" onclick="window.print()">Распечатать</button>
+  <button type="button" class="btn btn--ghost" data-print>Распечатать</button>
   {% if can_cancel %}
   <form method="post" action="/b/{{ booking.cancel_token }}/cancel" class="inline-form"
         data-confirm="Отменить запись на {{ starts_at | hm }}? Слот сразу станет доступен другим.">

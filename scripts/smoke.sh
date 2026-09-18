@@ -1,7 +1,7 @@
 #!/bin/bash
 # Сквозная проверка: админка → день → слот → капча → бронь → отмена
 set -u
-BASE=http://127.0.0.1:8080
+BASE=${BASE:-http://127.0.0.1:8080}
 CD=$(cd "$(dirname "$0")/.." && pwd)
 J=$(mktemp); S=$(mktemp)
 DATE=$(date -d "+2 days" +%F)
@@ -9,6 +9,11 @@ pass=0; fail=0
 ok(){ echo "  ok   $1"; pass=$((pass+1)); }
 no(){ echo "  FAIL $1"; fail=$((fail+1)); }
 sql(){ docker compose --project-directory "$CD" exec -T db psql -U au_queue -t -A -c "$1"; }
+
+# Учётные данные берём из .env, чтобы тест не расходился с настройками стенда
+envval(){ grep -E "^$1=" "$CD/.env" 2>/dev/null | head -1 | cut -d= -f2- ; }
+ADMIN_USER=$(envval ADMIN_USERNAME); ADMIN_USER=${ADMIN_USER:-uymin}
+ADMIN_PASS=$(envval ADMIN_PASSWORD); ADMIN_PASS=${ADMIN_PASS:-admin}
 post(){ local u="$1"; shift; curl -s "$BASE$u" "$@"; }
 
 echo "== 0. Чистая площадка"
@@ -16,14 +21,14 @@ sql "delete from reception_day where date='$DATE'" >/dev/null && ok "прошл�
 
 echo "== 1. Вход в админку"
 code=$(curl -s -o /dev/null -w '%{http_code}' -c "$J" -X POST "$BASE/admin/login" \
-  -d "username=uymin" -d "password=Priem2026")
+  --data-urlencode "username=$ADMIN_USER" --data-urlencode "password=$ADMIN_PASS")
 [ "$code" = 303 ] && ok "логин 303" || no "логин вернул $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$J" "$BASE/admin")
 [ "$code" = 200 ] && ok "сводка доступна" || no "сводка вернула $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin/days")
 [ "$code" = 303 ] && ok "без входа редирект на логин" || no "защита админки: $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/admin/login" \
-  --data-urlencode "username=uymin" --data-urlencode "password=пароль-с-кириллицей")
+  --data-urlencode "username=$ADMIN_USER" --data-urlencode "password=пароль-с-кириллицей")
 [ "$code" = 401 ] && ok "кириллический пароль → 401, а не 500" || no "неверный пароль: $code"
 
 echo "== 2. Создание дня $DATE, окно 14:00-16:00 по 5 мин"

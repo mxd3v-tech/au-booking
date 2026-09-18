@@ -43,6 +43,7 @@ services:
       GROUP_PATTERN: ${GROUP_PATTERN:-^[А-ЯЁ]{2}-[0-9]{2}-[0-9]{2}$}
       GROUP_PLACEHOLDER: ${GROUP_PLACEHOLDER:-КТ-24-04}
       DAYS_AHEAD: ${DAYS_AHEAD:-30}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${BIND_PORT:-8080}:8000"
 

@@ -34,21 +34,41 @@ docker compose up -d --build
 
 ### Проксирование через существующий nginx
 
-```nginx
-server {
-    server_name queue.uralolimp.website;
+Готовые конфиги лежат в `deploy/nginx/`, оба проверены `nginx -t`:
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
+| Файл | Когда брать |
+|---|---|
+| `queue.uralolimp.website.conf` | свой поддомен и HTTPS — основной вариант |
+| `queue-lan.conf` | локальная сеть без домена, студенты заходят по IP |
+
+```bash
+sudo cp deploy/nginx/queue.uralolimp.website.conf /etc/nginx/conf.d/
+sudo sed -i 's/queue.uralolimp.website/ваш.домен/g' /etc/nginx/conf.d/queue.uralolimp.website.conf
+sudo certbot --nginx -d ваш.домен
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Дальше обычный `certbot --nginx -d queue.uralolimp.website`.
+**После включения HTTPS поставьте `COOKIE_SECURE=1` в `.env`** и выполните
+`docker compose up -d` — тогда куки сессии и талона не уйдут по открытому http.
+Для LAN-варианта флаг должен остаться нулём, иначе вход в админку перестанет
+работать.
+
+Что в конфиге сверх голого `proxy_pass`:
+
+- **X-Forwarded-For** — без него приложение видит все брони как пришедшие
+  с `127.0.0.1`, и защита от флуда теряет смысл;
+- **кэш статики** — шрифты и логотип на 30 дней, CSS и JS на час. Внутри
+  `location` намеренно нет ни одного `add_header`: как только он там появляется,
+  nginx перестаёт наследовать заголовки безопасности с уровня `server`,
+  и статика остаётся без `nosniff`;
+- **CSP без `unsafe-inline` для скриптов** — инлайновых `<script>` и `onclick`
+  в шаблонах нет, тема подключается файлом `/static/js/theme.js`;
+- **лимиты запросов** — аккуратные. Ключ `$binary_remote_addr` — это внешний
+  адрес, а если корпус выходит через один NAT, вся группа придёт с одного IP.
+  Поэтому лимит на формы — 120 запросов в минуту с запасом `burst=40`: скрипт
+  ловится, живой поток студентов — нет. Подбор пароля в `/admin/login` отрезан
+  жёстче, там же есть закомментированный `allow` по сети колледжа;
+- `/healthz` наружу закрыт.
 
 ---
 
@@ -232,4 +252,4 @@ docker compose down -v            # остановить и стереть ба�
 типа капчи, бронь, лимит броней, приватность сетки, выгрузки XLSX и CSV,
 статусы, отмена и защита от двойной брони на уровне базы. Скрипт создаёт
 тестовый день на послезавтра и подчищает его за собой. Логин и пароль берутся
-из `.env` — если поменяли, поправьте их в начале скрипта.
+из `.env`, так что менять их в скрипте не нужно.

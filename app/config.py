@@ -13,6 +13,13 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "да"}
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str = os.getenv(
@@ -27,6 +34,10 @@ class Settings:
     site_title: str = os.getenv("SITE_TITLE", "Запись на приём")
 
     tz_name: str = os.getenv("TZ", "Asia/Yekaterinburg")
+
+    # Ставить только при работе за HTTPS: с этим флагом браузер не отправит
+    # куку по обычному http, и в локальной сети вход в админку «сломается».
+    cookie_secure: bool = _bool("COOKIE_SECURE", False)
 
     booking_lead_minutes: int = _int("BOOKING_LEAD_MINUTES", 5)
     max_active_bookings: int = _int("MAX_ACTIVE_BOOKINGS", 1)

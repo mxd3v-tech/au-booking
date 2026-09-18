@@ -21,6 +21,11 @@
     try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* приватный режим */ }
   });
 
+  // ── Печать ────────────────────────────────────────────────────────────
+  document.addEventListener('click', function (event) {
+    if (event.target.closest('[data-print]')) window.print();
+  });
+
   // ── Подтверждения ─────────────────────────────────────────────────────
   document.addEventListener('submit', function (event) {
     var form = event.target;
