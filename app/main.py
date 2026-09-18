@@ -170,6 +170,22 @@ async def lifespan(_: FastAPI):
     yield
 
 
+class RevalidatedStatic(StaticFiles):
+    """Статика с обязательной перепроверкой у сервера.
+
+    Без Cache-Control браузер вправе несколько часов рисовать страницу
+    скриптом из кэша: после обновления контейнера разметка приезжает новая,
+    а app.js остаётся старым — и часть капчи перестаёт отвечать на тапы.
+    С no-cache файл по-прежнему лежит в кэше, но сверяется по ETag и почти
+    всегда отдаётся как 304 — трафика это не добавляет.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 app = FastAPI(
     title=f"{settings.site_title} — {settings.teacher_name}",
     docs_url=None,
@@ -178,7 +194,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.mount("/static", RevalidatedStatic(directory=str(STATIC_DIR)), name="static")
 app.include_router(public.router)
 app.include_router(admin.router)
 

@@ -414,6 +414,14 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("КСП-24-04", page)
         self.assertNotIn("две буквы", page)
 
+    def test_static_is_revalidated_after_a_rebuild(self):
+        code, headers, _ = http("/static/js/app.js")
+        self.assertEqual(code, 200)
+        # Без этого браузер несколько часов рисует новую страницу старым
+        # скриптом: разметка свежая, обработчиков новых заданий в ней нет.
+        self.assertEqual(headers.get("Cache-Control"), "no-cache")
+        self.assertTrue(headers.get("ETag"))
+
     def test_admin_captcha_has_one_shared_slot(self):
         code, _, body = http("/admin/captcha?kind=quiz", cookie=self.admin)
         self.assertEqual(code, 200)
