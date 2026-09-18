@@ -30,6 +30,13 @@ services:
       ADMIN_PASSWORD: smoke-password
       COOKIE_SECURE: "0"
       TZ: Europe/Moscow
+      # Оператор для страницы согласия: проверяем её так, как она выглядит
+      # в настроенном сервисе, а не с предупреждением «оператор не указан».
+      ORG_NAME: Тестовый университет
+      ORG_ADDRESS: г. Тестоград, ул. Проверочная, 1
+      PRIVACY_CONTACT: pd@example.test
+      CONSENT_VERSION: smoke-1
+      RETENTION_DAYS: "180"
     ports:
       - "127.0.0.1::8000"
     volumes:

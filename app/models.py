@@ -150,6 +150,16 @@ class QueueEntry(Base):
     )
     added_by_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     ip_hash: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    # Согласие на обработку персональных данных: когда дано и по какой
+    # редакции текста. Само согласие юридически значимо только вместе с
+    # этими двумя полями — по ним видно, на что именно человек согласился.
+    # У записей, сделанных до появления согласия, поля пустые.
+    consent_version: Mapped[str] = mapped_column(
+        String(32), default="", server_default=text("''"), nullable=False
+    )
+    consent_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     session: Mapped[QueueSession] = relationship(back_populates="entries")
     purpose: Mapped["Purpose | None"] = relationship()
@@ -157,6 +167,14 @@ class QueueEntry(Base):
     @property
     def is_waiting(self) -> bool:
         return self.status is EntryStatus.waiting
+
+    @property
+    def consent_label(self) -> str:
+        """Согласие для выгрузки и печати: редакция и время, когда его дали."""
+        if not self.consent_version or self.consent_at is None:
+            return ""
+        source = "лично" if self.added_by_admin else "в форме"
+        return f"ред. {self.consent_version}, {source}"
 
 
 class Purpose(Base):

@@ -12,7 +12,12 @@ from app.models import EntryStatus, QueueEntry
 from app.security import clean_text
 from app.services.queue import to_local
 
-HEADERS = ["№", "Фамилия и имя", "Группа", "Цель визита", "Комментарий", "Статус", "Встал в очередь"]
+# Согласие — последним столбцом: это не про очередь, а про то, чем
+# подтверждается право хранить эти строки.
+HEADERS = [
+    "№", "Фамилия и имя", "Группа", "Цель визита", "Комментарий", "Статус",
+    "Встал в очередь", "Согласие на обработку данных",
+]
 
 BRAND = "015D1E"
 
@@ -27,6 +32,11 @@ def _rows(entries: list[QueueEntry]) -> list[list[str]]:
             entry.comment,
             EntryStatus(entry.status).label,
             f"{to_local(entry.created_at):%d.%m.%Y %H:%M}",
+            (
+                f"{entry.consent_label}, {to_local(entry.consent_at):%d.%m.%Y %H:%M}"
+                if entry.consent_at
+                else "нет отметки"
+            ),
         ]
         for entry in entries
     ]
@@ -85,7 +95,7 @@ def to_xlsx(entries: list[QueueEntry], title: str) -> bytes:
             cell.border = border
             cell.alignment = Alignment(vertical="center", wrap_text=column in (4, 5))
 
-    widths = [5, 30, 12, 26, 30, 14, 18]
+    widths = [5, 30, 12, 26, 30, 14, 18, 26]
     for column, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(column)].width = width
 

@@ -5,12 +5,13 @@ import datetime as dt
 import hashlib
 import json
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.models import EntryStatus, QueueEntry, QueueSession
+from app.security import name_tokens
 
 WEEKDAYS = [
     "понедельник",
@@ -199,6 +200,30 @@ def close_session(db: Session, session: QueueSession) -> int:
     return left_waiting
 
 
+def purge_expired(db: Session, days: int | None = None) -> int:
+    """Удалить закрытые приёмы, у которых вышел срок хранения.
+
+    Согласие на обработку данных даётся не навсегда: в политике написано,
+    сколько живёт список приёма, и это обещание надо выполнять без ручной
+    уборки. Записи уходят вместе с приёмом — на них стоит `ON DELETE CASCADE`.
+
+    `RETENTION_DAYS=0` выключает удаление: сервис снова хранит историю
+    бессрочно, и тогда об этом честно написано на странице про данные.
+    Возвращает, сколько приёмов удалено.
+    """
+    days = settings.retention_days if days is None else days
+    if days <= 0:
+        return 0
+    edge = utc_now() - dt.timedelta(days=days)
+    removed = db.execute(
+        delete(QueueSession).where(
+            QueueSession.closed_at.is_not(None), QueueSession.closed_at < edge
+        )
+    ).rowcount
+    db.commit()
+    return removed or 0
+
+
 def session_by_id(db: Session, session_id: int) -> QueueSession | None:
     return db.scalar(
         select(QueueSession)
@@ -247,16 +272,34 @@ def _namesake_key(full_name_key: str, group_name: str, attempt: int) -> str:
     return (full_name_key + suffix)[:160]
 
 
+def same_person(db: Session, session_id: int, full_name_key: str) -> QueueEntry | None:
+    """Запись того же человека в этом приёме — даже если к ФИО дописали слово.
+
+    Уникальный индекс сравнивает ключи целиком, а фамилия теперь бывает и в
+    два слова: «Абдул Гамид Рашид» и «Абдул Рашид» дают разные ключи, хотя
+    это один человек. Поэтому сравниваем наборы слов: один набор вложен в
+    другой — значит, ФИО просто дописали или укоротили.
+
+    Вызывается под блокировкой сеанса, поэтому проехать мимо проверки на
+    гонке нельзя. Очередь — это десятки записей, читать их целиком дешевле,
+    чем изобретать индекс по подмножествам.
+    """
+    tokens = name_tokens(full_name_key)
+    rows = db.scalars(
+        select(QueueEntry).where(QueueEntry.session_id == session_id)
+    ).all()
+    for entry in rows:
+        other = name_tokens(entry.full_name_key)
+        if tokens <= other or other <= tokens:
+            return entry
+    return None
+
+
 def _already_joined_message(
     db: Session, session_id: int, full_name_key: str, full_name: str
 ) -> str:
     """Отказ по делу: человек должен понять, что именно ему делать дальше."""
-    existing = db.scalar(
-        select(QueueEntry).where(
-            QueueEntry.session_id == session_id,
-            QueueEntry.full_name_key == full_name_key,
-        )
-    )
+    existing = same_person(db, session_id, full_name_key)
     if existing is not None and existing.is_waiting:
         return (
             f"{full_name} уже стоит в этой очереди под №{existing.number}. "
@@ -282,14 +325,23 @@ def join_queue(
     ip_hash: str = "",
     added_by_admin: bool = False,
     allow_namesake: bool = False,
+    consent_version: str = "",
 ) -> QueueEntry:
     """Встать в очередь. Номер выдаётся следующим по порядку.
 
-    Не пустить запись могут два ограничения базы, и ведём мы себя по-разному:
+    Одного и того же человека в приёме не будет по трём причинам, и ведём мы
+    себя в них по-разному:
 
+      * набор слов ФИО вложен в уже записанный — дописанное или убранное
+        слово нового человека не делает; отказ с объяснением.
+      * `uq_entry_person` — тот же ключ ФИО пришёл на гонке запросов.
       * `uq_entry_number` — страховка от записи в обход блокировки сеанса.
-      * `uq_entry_person` — этот человек в приёме уже есть. Студенту отказ,
-        а подтверждённому в админке однофамильцу дописываем к ключу группу.
+
+    Подтверждённому в админке однофамильцу вместо отказа дописываем к ключу
+    группу: решает живой человек, который видит очередь целиком.
+
+    `consent_version` — редакция согласия на обработку персональных данных;
+    пустая означает, что согласия нет, и время его тоже не ставим.
     """
     last_error: IntegrityError | None = None
     session_id = session.id
@@ -300,6 +352,11 @@ def join_queue(
         # После rollback блокировка потеряна: на каждой попытке берём её
         # заново и читаем актуальный closed_at, а не объект из identity map.
         _lock_open_session(db, session_id)
+        if not allow_namesake and same_person(db, session_id, key) is not None:
+            db.rollback()
+            raise QueueError(
+                _already_joined_message(db, session_id, key, full_name)
+            )
         number = (
             db.scalar(
                 select(func.max(QueueEntry.number)).where(
@@ -320,6 +377,8 @@ def join_queue(
             token=token,
             ip_hash=ip_hash,
             added_by_admin=added_by_admin,
+            consent_version=consent_version,
+            consent_at=utc_now() if consent_version else None,
         )
         db.add(entry)
         try:

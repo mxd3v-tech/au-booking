@@ -118,7 +118,11 @@
   <div class="grid grid--2">
     <div class="card">
       <h3>Записать вручную</h3>
-      <p class="card__meta">Для тех, кто пришёл без телефона.</p>
+      <p class="card__meta">
+        Для тех, кто пришёл без телефона. Здесь же записывают тех, кому
+        отказала форма: настоящую фамилию, похожую на запрещённое слово, и
+        студентов младше 18 лет — за них согласие даёт законный представитель.
+      </p>
       <form method="post" action="/admin/entries">
         <div class="field">
           <label class="field__label" for="m_name">Фамилия и имя</label>
@@ -150,6 +154,17 @@
           <p class="field__hint">
             Один человек записывается на приём только один раз. Отметьте, если
             в очереди уже есть такие же фамилия и имя, но это другой студент.
+          </p>
+        </div>
+        <div class="field">
+          <label class="checkbox">
+            <input type="checkbox" name="consent" required>
+            <span>Согласие на обработку данных получено</span>
+          </label>
+          <p class="field__hint">
+            Спросите человека вслух или возьмите бумажное согласие — и отметьте
+            здесь. В записи останется, что согласие получено лично и по какой
+            редакции: <a href="/privacy#consent" target="_blank" rel="noopener">текст</a>.
           </p>
         </div>
         <button type="submit" class="btn btn--primary">Поставить в очередь</button>

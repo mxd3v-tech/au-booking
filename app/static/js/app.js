@@ -67,17 +67,33 @@
   var slot = document.querySelector('[data-captcha-slot]');
   var submitButton = document.querySelector('[data-join-submit]');
   var hiddenInput = document.querySelector('[data-captcha-input]');
+  var consentBox = document.querySelector('[data-consent]');
   // Сколько разбор ошибки висит на экране, прежде чем придёт другое задание.
   var WRONG_PAUSE = 2600;
+  var solved = false;
 
-  function setSubmitReady(ready) {
+  // Кнопка ждёт и решённое задание, и отметку согласия. Проверку того же
+  // самого сервер всё равно повторит, но забытая галочка не должна сжигать
+  // задание: на замену пришло бы новое, и человек решал бы его заново.
+  function refreshSubmit() {
     if (!submitButton) return;
+    var consented = !consentBox || consentBox.checked;
+    var ready = solved && consented;
     submitButton.disabled = !ready;
     submitButton.classList.toggle('is-disabled', !ready);
-    submitButton.textContent = ready
-      ? 'Встать в очередь'
-      : 'Решите задание, чтобы встать в очередь';
+    submitButton.textContent = !solved
+      ? 'Решите задание, чтобы встать в очередь'
+      : !consented
+        ? 'Отметьте согласие на обработку данных'
+        : 'Встать в очередь';
   }
+
+  function setSubmitReady(ready) {
+    solved = ready;
+    refreshSubmit();
+  }
+
+  if (consentBox) consentBox.addEventListener('change', refreshSubmit);
 
   function showFeedback(box, result) {
     var feedback = box.querySelector('[data-captcha-feedback]');

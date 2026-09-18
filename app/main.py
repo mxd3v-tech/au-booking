@@ -19,6 +19,7 @@ from app.db import Base, SessionLocal, engine
 from app.models import Purpose, QueueEntry
 from app.routers import admin, public
 from app.security import name_key
+from app.services import queue as queue_service
 from app.templating import templates
 
 logger = logging.getLogger("au-queue")
@@ -85,6 +86,53 @@ def _rebuild_name_keys() -> None:
         )
 
 
+def _sql_literal(value: object) -> str:
+    """Значение по умолчанию для DDL: параметры в ALTER TABLE не подставить."""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _add_missing_columns(inspector, table) -> None:
+    """Досоздать колонки, появившиеся в модели после первого запуска.
+
+    Та же беда, что и с индексами: `create_all` существующую таблицу не
+    трогает. Так согласие на обработку данных («когда» и «по какой редакции»)
+    без этого шага до рабочей базы не доехало бы вовсе.
+
+    NOT NULL-колонке нужен DEFAULT: в таблице уже лежат записи, и без него
+    PostgreSQL ALTER не пропустит. Значение берём из модели — у прежних
+    записей оно и означает «согласия в базе нет».
+    """
+    existing = {column["name"] for column in inspector.get_columns(table.name)}
+    for column in table.columns:
+        if column.name in existing:
+            continue
+        spec = f"{column.name} {column.type.compile(engine.dialect)}"
+        default = getattr(column.default, "arg", None)
+        if not column.nullable:
+            if default is None or callable(default):
+                logger.error(
+                    "Колонку %s.%s нельзя добавить автоматически: она NOT NULL, "
+                    "а значения по умолчанию у неё нет",
+                    table.name,
+                    column.name,
+                )
+                continue
+            spec += f" NOT NULL DEFAULT {_sql_literal(default)}"
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table.name} ADD COLUMN IF NOT EXISTS {spec}"
+                )
+        except SQLAlchemyError:
+            logger.exception("Не удалось добавить колонку %s.%s", table.name, column.name)
+        else:
+            logger.info("Добавлена колонка %s.%s", table.name, column.name)
+
+
 def _upgrade_schema() -> None:
     """Досоздать в уже существующих таблицах то, чего в них нет.
 
@@ -108,6 +156,7 @@ def _upgrade_schema() -> None:
     for table in Base.metadata.sorted_tables:
         if table.name not in tables:
             continue  # таблицы нет — create_all создаст её вместе с индексами
+        _add_missing_columns(inspector, table)
         known = _existing_names(inspector, table.name)
 
         missing = [index for index in table.indexes if index.name not in known]
@@ -159,14 +208,37 @@ def _seed() -> None:
             logger.info("Справочник целей визита заполнен значениями по умолчанию")
 
 
+def _purge_expired() -> None:
+    """Убрать приёмы, у которых вышел срок хранения из политики.
+
+    Планировщика в сервисе нет: чистим при старте и при закрытии приёма.
+    Для сервиса, который поднимают к началу семестра и перезапускают после
+    обновлений, этого достаточно — обещанный срок не растягивается.
+    """
+    with SessionLocal() as db:
+        removed = queue_service.purge_expired(db)
+    if removed:
+        logger.info(
+            "Срок хранения (%s дн.) вышел: удалено приёмов %s",
+            settings.retention_days,
+            removed,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _wait_for_db()
     Base.metadata.create_all(engine)
     _upgrade_schema()
     _seed()
+    _purge_expired()
     if settings.secret_key == "dev-insecure-secret-key":
         logger.warning("SECRET_KEY не задан — сессии подписаны отладочным ключом")
+    if not settings.operator_known:
+        logger.warning(
+            "ORG_NAME не задан: в согласии на обработку данных не будет "
+            "оператора, и юридической силы у такого согласия нет"
+        )
     yield
 
 

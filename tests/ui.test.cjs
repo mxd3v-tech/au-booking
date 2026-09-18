@@ -402,6 +402,57 @@ test('expired challenge without a replacement falls back to a fresh request', as
     ['/api/captcha/challenge-id', '/api/captcha?previous=challenge-id']);
 });
 
+// ── Согласие на обработку данных ─────────────────────────────────────────
+
+// Кнопка записи ждёт и решённое задание, и отметку согласия: забытая галочка
+// не должна сжигать задание — на замену пришло бы новое.
+function consentPage(response) {
+  const quiz = captcha('quiz', optionsList('data-quiz-option', 4));
+  const slot = {querySelector() { return quiz; }, hasAttribute() { return false; }};
+  const submit = {
+    classList: {classes: new Set(), toggle(name, on) { on ? this.classes.add(name) : this.classes.delete(name); },
+      contains(name) { return this.classes.has(name); }},
+    disabled: true,
+    textContent: ''
+  };
+  const consent = el('input', {'data-consent': ''});
+  consent.checked = false;
+  const page = boot({
+    '[data-captcha-slot]': slot,
+    '[data-captcha-input]': {value: 'challenge-id'},
+    '[data-join-submit]': submit,
+    '[data-consent]': consent
+  }, response);
+  return {...page, quiz, submit, consent};
+}
+
+test('solved captcha alone does not unlock the submit button', async () => {
+  const page = consentPage(accepted);
+  dispatch(page.quiz.querySelector('[data-quiz-option]'), 'click');
+  await new Promise(setImmediate);
+
+  assert.equal(page.submit.disabled, true, 'без согласия кнопка заперта');
+  assert.equal(page.submit.textContent, 'Отметьте согласие на обработку данных');
+
+  page.consent.checked = true;
+  dispatch(page.consent, 'change');
+  assert.equal(page.submit.disabled, false);
+  assert.equal(page.submit.textContent, 'Встать в очередь');
+
+  // Галочку сняли обратно — отправлять снова нельзя.
+  page.consent.checked = false;
+  dispatch(page.consent, 'change');
+  assert.equal(page.submit.disabled, true);
+});
+
+test('consent alone does not unlock the submit button either', () => {
+  const page = consentPage(accepted);
+  page.consent.checked = true;
+  dispatch(page.consent, 'change');
+  assert.equal(page.submit.disabled, true);
+  assert.equal(page.submit.textContent, 'Решите задание, чтобы встать в очередь');
+});
+
 test('preview swaps in the replacement and moves the highlight to its type', async () => {
   const wrong = {
     ok: false, expired: true, title: 'Мимо', text: 'Разбор',

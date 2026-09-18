@@ -243,6 +243,10 @@ def session_close(db: Session = Depends(get_db)):
     message = "Приём закрыт, список ушёл в историю."
     if left:
         message += f" Не дождались: {left}."
+    # Заодно убираем приёмы, у которых вышел срок хранения: обещание из
+    # политики выполняется само, без ручной уборки истории.
+    if expired := queue_service.purge_expired(db):
+        message += f" По сроку хранения удалено прошлых приёмов: {expired}."
     return _back(f"/admin/sessions/{session_id}", ok=message)
 
 
@@ -254,11 +258,18 @@ def entry_add(
     purpose_id: str = Form(""),
     comment: str = Form(""),
     namesake: str = Form(""),
+    consent: str = Form(""),
 ):
     """Поставить в очередь руками — для тех, кто пришёл без телефона.
 
+    Здесь же проходят и те, кому отказала форма: настоящая фамилия, попавшая
+    под фильтр брани, и студент младше 18 лет, за которого согласие даёт
+    законный представитель. Поэтому фильтра ФИО в этой форме нет — решает
+    преподаватель, который видит живого человека.
+
     Галочка «однофамилец» — единственный способ завести в приёме второе
-    такое же ФИО: решает живой человек, который видит очередь целиком.
+    такое же ФИО. Галочка «согласие получено» обязательна: без записанного
+    согласия персональные данные в список попадать не должны.
     """
     session = queue_service.current_session(db)
     if session is None:
@@ -270,6 +281,12 @@ def entry_add(
         return _back("/admin", err=error)
     if error := validate_group(group):
         return _back("/admin", err=error)
+    if consent != "on":
+        return _back(
+            "/admin",
+            err="Отметьте, что согласие на обработку данных получено — "
+                "иначе записывать человека в список нельзя.",
+        )
 
     purpose = next((p for p in _active_purposes(db) if str(p.id) == purpose_id), None)
     try:
@@ -284,6 +301,7 @@ def entry_add(
             token=new_entry_token(),
             added_by_admin=True,
             allow_namesake=namesake == "on",
+            consent_version=settings.consent_version,
         )
     except queue_service.QueueError as exc:
         return _back("/admin", err=str(exc))

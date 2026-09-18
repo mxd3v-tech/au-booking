@@ -24,8 +24,9 @@ trap 'exit 143' TERM
 "${compose[@]}" up -d --build --wait --wait-timeout 90 || exit 1
 PORT=$("${compose[@]}" port app 8000) || exit 1
 BASE="http://$PORT"
-A="$TMP/admin"; U1="$TMP/user1"; U2="$TMP/user2"; U3="$TMP/user3"; S="$TMP/response"
-touch "$A" "$U1" "$U2" "$U3" "$S" || exit 1
+A="$TMP/admin"; U1="$TMP/user1"; U2="$TMP/user2"; U3="$TMP/user3"
+U4="$TMP/user4"; S="$TMP/response"
+touch "$A" "$U1" "$U2" "$U3" "$U4" "$S" || exit 1
 pass=0; fail=0
 ok(){ echo "  ok   $1"; pass=$((pass+1)); }
 no(){ echo "  FAIL $1"; fail=$((fail+1)); }
@@ -53,6 +54,15 @@ echo "== 2. Приём закрыт"
 curl -s "$BASE/" | grep -q "Сейчас приёма нет" && ok "студент видит «приёма нет»" || no "нет надписи о закрытом приёме"
 c=$(code "$BASE/join"); [ "$c" = 303 ] && ok "встать в очередь нельзя" || no "/join при закрытом приёме: $c"
 
+echo "== 2.5 Персональные данные"
+curl -s "$BASE/privacy" > "$S"
+grep -q "Обработка персональных данных" "$S" && ok "страница про данные открывается" || no "страницы про данные нет"
+grep -q "Тестовый университет" "$S" && ok "оператор на странице указан" || no "оператора на странице нет"
+grep -q "Текст согласия" "$S" && ok "текст согласия виден" || no "текста согласия нет"
+grep -q "pd@example.test" "$S" && ok "адрес для отзыва согласия указан" || no "контакта для отзыва нет"
+grep -q "Оператор не указан" "$S" && no "предупреждение об операторе при заданном ORG_NAME" || ok "предупреждения об операторе нет"
+curl -s "$BASE/" | grep -q 'href="/privacy"' && ok "ссылка на страницу про данные в подвале" || no "ссылки на /privacy нет"
+
 echo "== 3. Открытие приёма"
 c=$(code -b "$A" -X POST "$BASE/admin/session/open" \
   --data-urlencode "room=1215" --data-urlencode "time_from=14:00" --data-urlencode "time_to=16:00" \
@@ -79,6 +89,9 @@ grep -q "каб. 1215" "$S" && ok "кабинет 1215 показан" || no "к
 grep -q "14:00–16:00" "$S" && ok "время приёма показано" || no "времени приёма не видно"
 grep -q "Сегодня только пересдачи" "$S" && ok "заметка показана" || no "заметки нет"
 grep -q "Встать в очередь" "$S" && ok "кнопка записи на месте" || no "нет кнопки записи"
+curl -s -b "$U1" "$BASE/join" > "$S"
+grep -q 'name="consent"' "$S" && ok "в форме есть галочка согласия" || no "галочки согласия нет"
+grep -q 'href="/privacy#consent"' "$S" && ok "рядом ссылка на полный текст" || no "ссылки на текст согласия нет"
 
 # Ответ любого типа задания так, как его отправил бы браузер.
 solve(){ sql "select kind || '|' || answer::text from captcha_challenge where id='$1'" | python3 -c '
@@ -133,15 +146,18 @@ other=$(curl -s "$BASE/api/captcha?previous=$cid" | field kind)
 PID=$(sql "select id from purpose where needs_comment = false order by sort_order limit 1")
 PID_C=$(sql "select id from purpose where needs_comment = true order by sort_order limit 1")
 
-join(){ # jar, фамилия имя, группа, [цель], [комментарий]
-  local jar="$1" name="$2" grp="$3" purpose="${4:-$PID}" note="${5:-}"
+join(){ # jar, фамилия имя, группа, [цель], [комментарий], [consent=on]
+  # Согласие: ${6-on}, а не ${6:-on} — явно переданная пустая строка должна
+  # означать «галочку не отметили», иначе проверка отказа ничего не проверяет.
+  local jar="$1" name="$2" grp="$3" purpose="${4:-$PID}" note="${5:-}" ok="${6-on}"
   curl -s -b "$jar" "$BASE/join" > "$S"
   local cid; cid=$(grep -o 'name="captcha_id" value="[^"]*"' "$S" | cut -d'"' -f4)
   curl -s -o /dev/null -X POST "$BASE/api/captcha/$cid" --data-urlencode "answer=$(solve "$cid")"
   code -b "$jar" -c "$jar" -X POST "$BASE/join" \
     --data-urlencode "full_name=$name" --data-urlencode "group_name=$grp" \
     --data-urlencode "purpose_id=$purpose" --data-urlencode "comment=$note" \
-    --data-urlencode "captcha_id=$cid" --data-urlencode "session_id=$SID"
+    --data-urlencode "captcha_id=$cid" --data-urlencode "session_id=$SID" \
+    --data-urlencode "consent=$ok"
 }
 
 echo "== 7. Проверки формы"
@@ -154,6 +170,14 @@ c=$(code -X POST "$BASE/join" --data-urlencode "full_name=Иванов Иван"
 c=$(join "$U3" "Иванов" "КТ-24-04"); [ "$c" = 422 ] && ok "одна фамилия без имени не проходит" || no "имя не проверяется: $c"
 c=$(join "$U3" "Сидоров Пётр" "КТ2404"); [ "$c" = 422 ] && ok "кривая группа не проходит" || no "группа не проверяется: $c"
 c=$(join "$U3" "Сидоров Пётр" "КТ-24-04" "$PID_C" ""); [ "$c" = 422 ] && ok "цель с обязательным пояснением требует его" || no "пояснение не требуется: $c"
+c=$(join "$U3" "Сидоров Пётр" "КТ-24-04" "$PID" "" "")
+[ "$c" = 422 ] && ok "без согласия на обработку данных не записывает" || no "согласие не обязательно: $c"
+n=$(sql "select count(*) from queue_entry where full_name='Сидоров Пётр'")
+[ "$n" = 0 ] && ok "отказ без согласия ничего не записал" || no "запись без согласия всё же появилась"
+c=$(join "$U3" "Хуев Иван" "КТ-24-04"); [ "$c" = 422 ] && ok "мат в ФИО не проходит" || no "мат в ФИО принят: $c"
+c=$(join "$U3" "Ху Йов" "КТ-24-04"); [ "$c" = 422 ] && ok "мат по слогам тоже не проходит" || no "мат по слогам принят: $c"
+c=$(join "$U3" "Xyeв Пётр" "КТ-24-04"); [ "$c" = 422 ] && ok "латиница вместо кириллицы не спасает" || no "подмена букв прошла: $c"
+c=$(join "$U3" "Ааа Ббб" "КТ-24-04"); [ "$c" = 422 ] && ok "бессмысленный набор букв не проходит" || no "«Ааа Ббб» принято: $c"
 
 echo "== 8. Очередь набирается"
 c=$(join "$U1" "Иванов Иван" "КТ-24-04" "$PID" "лабораторная 4")
@@ -175,6 +199,17 @@ c=$(join "$U3" "Иванов Иван" "КТ-24-09")
 [ "$c" = 422 ] && ok "другая группа не помогает" || no "дубль через группу: $c"
 c=$(join "$U3" "Иванов Иван Петрович" "КТ-24-04")
 [ "$c" = 422 ] && ok "дописанное отчество не помогает" || no "дубль через отчество: $c"
+c=$(join "$U3" "Иванов Иван Оглы" "КТ-24-04")
+[ "$c" = 422 ] && ok "дописанное к ФИО слово не делает нового человека" || no "дубль через лишнее слово: $c"
+
+# Фамилия из двух слов — законный случай, а не попытка обхода. Записываем
+# с отдельного «телефона»: у U3 куки остаются чистыми для проверок дублей.
+c=$(join "$U4" "Абдул Гамид Рашид" "КТ-24-04")
+[ "$c" = 303 ] && ok "фамилия из двух слов принята" || no "двойная фамилия не прошла: $c"
+n=$(sql "select number from queue_entry where full_name='Абдул Гамид Рашид'")
+[ "$n" = 3 ] && ok "ей достался номер 3" || no "номер двойной фамилии: $n"
+c=$(join "$U3" "Абдул Рашид" "КТ-24-04")
+[ "$c" = 422 ] && ok "он же без второго слова фамилии — уже записан" || no "укороченное ФИО прошло дважды: $c"
 
 # Ключ берём из базы, а не зашиваем: тест проверяет ограничение, а не формат.
 K=$(sql "select full_name_key from queue_entry where full_name='Иванов Иван'")
@@ -194,7 +229,8 @@ curl -s -b "$U2" "$BASE/" > "$S"
 grep -q "Ваш номер" "$S" && ok "свой номер показан" || no "нет блока «Ваш номер»"
 grep -q "Перед вами: 1 человек" "$S" && ok "склонение «1 человек» верное" || no "не та фраза о числе впереди"
 r=$(curl -s -b "$U2" "$BASE/api/queue")
-echo "$r" | grep -q '"waiting": *2' && ok "api отдаёт 2 ожидающих" || no "api: $r"
+# В очереди трое: Иванов, Петрова и человек с фамилией из двух слов.
+echo "$r" | grep -q '"waiting": *3' && ok "api отдаёт 3 ожидающих" || no "api: $r"
 echo "$r" | grep -q '"mine": *2' && ok "api знает мой номер" || no "api не видит мою запись"
 
 echo "== 11. Выход из очереди"
@@ -202,7 +238,7 @@ c=$(code -b "$U2" -X POST "$BASE/leave"); [ "$c" = 303 ] && ok "выход пр�
 st=$(sql "select status from queue_entry where full_name='Петрова Анна'")
 [ "$st" = "left" ] && ok "статус «ушёл» проставлен" || no "статус после выхода: $st"
 n=$(sql "select count(*) from queue_entry where session_id=$SID and status='waiting'")
-[ "$n" = 1 ] && ok "в очереди остался один" || no "ожидающих: $n"
+[ "$n" = 2 ] && ok "в очереди остались двое" || no "ожидающих: $n"
 
 echo "== 12. Отметки преподавателя"
 EID=$(sql "select id from queue_entry where full_name='Иванов Иван'")
@@ -215,22 +251,39 @@ c=$(join "$U3" "Иванов Иван" "КТ-24-04")
 [ "$c" = 422 ] && ok "после «принят» второй раз не записаться" || no "повтор после приёма прошёл: $c"
 
 echo "== 13. Запись вручную"
+# Без -X POST: иначе curl повторит POST и после редиректа на панель.
+curl -s -L -o "$S" -b "$A" "$BASE/admin/entries" \
+  --data-urlencode "full_name=Безсогласьев Олег" --data-urlencode "group_name=КС-23-04" \
+  --data-urlencode "purpose_id=$PID"
+grep -q "иначе записывать человека" "$S" \
+  && ok "без отметки о согласии вручную не записать" || no "согласие в админке не требуется"
+n=$(sql "select count(*) from queue_entry where full_name='Безсогласьев Олег'")
+[ "$n" = 0 ] && ok "запись без согласия не создана" || no "запись без согласия появилась"
 c=$(code -b "$A" -X POST "$BASE/admin/entries" \
   --data-urlencode "full_name=Кузнецов Олег" --data-urlencode "group_name=КС-23-04" \
-  --data-urlencode "purpose_id=$PID")
+  --data-urlencode "purpose_id=$PID" --data-urlencode "consent=on")
 [ "$c" = 303 ] && ok "ручная запись создана" || no "ручная запись: $c"
+v=$(sql "select consent_version from queue_entry where full_name='Кузнецов Олег'")
+[ -n "$v" ] && ok "редакция согласия сохранена ($v)" || no "редакции согласия нет"
+# Фильтр ФИО — только в студенческой форме: настоящую фамилию вписывает
+# преподаватель, и здесь она проходит.
+c=$(code -b "$A" -X POST "$BASE/admin/entries" \
+  --data-urlencode "full_name=Херсонский Лев" --data-urlencode "group_name=КС-23-04" \
+  --data-urlencode "purpose_id=$PID" --data-urlencode "consent=on")
+n=$(sql "select count(*) from queue_entry where full_name='Херсонский Лев'")
+[ "$n" = 1 ] && ok "настоящую фамилию преподаватель вписывает без фильтра" || no "админке отказали в фамилии: $c"
 n=$(sql "select number from queue_entry where full_name='Кузнецов Олег'")
-[ "$n" = 3 ] && ok "ей достался номер 3" || no "номер ручной записи: $n"
+[ "$n" = 4 ] && ok "ей достался номер 4" || no "номер ручной записи: $n"
 c=$(code -b "$A" -X POST "$BASE/admin/entries" \
   --data-urlencode "full_name=Иванов Иван" --data-urlencode "group_name=КС-23-04" \
-  --data-urlencode "purpose_id=$PID")
+  --data-urlencode "purpose_id=$PID" --data-urlencode "consent=on")
 n=$(sql "select count(*) from queue_entry where session_id=$SID and full_name='Иванов Иван'")
 [ "$n" = 1 ] && ok "вручную дубль тоже не завести" || no "админка завела дубль: записей $n"
 c=$(code -b "$A" -X POST "$BASE/admin/entries" \
   --data-urlencode "full_name=Иванов Иван" --data-urlencode "group_name=КС-23-04" \
-  --data-urlencode "purpose_id=$PID" --data-urlencode "namesake=on")
+  --data-urlencode "purpose_id=$PID" --data-urlencode "consent=on" --data-urlencode "namesake=on")
 n=$(sql "select number from queue_entry where full_name='Иванов Иван' and group_name='КС-23-04'")
-[ "$n" = 4 ] && ok "однофамилец по галочке прошёл, номер 4" || no "однофамилец не прошёл: $n"
+[ -n "$n" ] && ok "однофамилец по галочке прошёл, номер $n" || no "однофамилец не прошёл: $n"
 
 echo "== 14. Выгрузки и печать"
 curl -s -b "$A" "$BASE/admin/sessions/$SID/export.xlsx" -o "$S"
@@ -244,6 +297,8 @@ PY
 curl -s -b "$A" "$BASE/admin/sessions/$SID/export.csv" -o "$S"
 head -c3 "$S" | od -An -tx1 | grep -q "ef bb bf" && ok "csv с BOM для Excel" || no "csv без BOM"
 grep -q "Кузнецов Олег" "$S" && ok "в csv есть ручная запись" || no "csv без ручной записи"
+grep -q "Согласие на обработку данных" "$S" && ok "в csv есть столбец согласия" || no "csv без согласия"
+grep -q "smoke-1" "$S" && ok "в csv видна редакция согласия" || no "редакции согласия в csv нет"
 c=$(code -b "$A" "$BASE/admin/sessions/$SID/print")
 [ "$c" = 200 ] && ok "печатная форма открывается" || no "печать вернула $c"
 
@@ -302,7 +357,7 @@ curl -s -b "$A" --get --data-urlencode "q=Иванов" "$BASE/admin/entries" | 
 curl -s -b "$A" --get --data-urlencode "group=АИ-23-04" "$BASE/admin/entries" | grep -q "Петрова Анна" \
   && ok "фильтр по группе работает" || no "фильтр по группе не сработал"
 n=$(sql "select count(*) from queue_entry where session_id=$SID")
-[ "$n" = 4 ] && ok "все четыре записи на месте" || no "записей в истории: $n"
+[ "$n" = 6 ] && ok "все шесть записей на месте" || no "записей в истории: $n"
 
 echo "== 19. Регрессионные проверки"
 "${compose[@]}" exec -T app python -m unittest discover -s /tests -v \

@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import moderation
 from app.captcha import consume_challenge, issue_challenge, verify_challenge
 from app.config import settings
 from app.db import get_db
@@ -161,6 +162,7 @@ def join_submit(
     comment: str = Form(""),
     captcha_id: str = Form(""),
     session_id: str = Form(""),
+    consent: str = Form(""),
 ):
     session = queue_service.current_session(db)
     if session is None:
@@ -182,6 +184,7 @@ def join_submit(
                 "group_name": clean_group(group_name),
                 "purpose_id": purpose_id,
                 "comment": clean_text(comment).strip()[:200],
+                "consent": consent,
             },
             status_code=409,
         )
@@ -199,8 +202,19 @@ def join_submit(
     errors: dict[str, str] = {}
     if error := validate_full_name(name):
         errors["full_name"] = error
+    # Фильтр брани — только в студенческой форме: в админке ФИО вписывает
+    # преподаватель, и настоящая фамилия, попавшая под фильтр, проходит
+    # именно через него.
+    elif error := moderation.check_name(name):
+        errors["full_name"] = error
     if error := validate_group(group):
         errors["group_name"] = error
+    # Согласие на обработку персональных данных: без него записывать нельзя.
+    if consent != "on":
+        errors["consent"] = (
+            "Без согласия на обработку персональных данных записать вас в "
+            "очередь нельзя: в списке видны фамилия, имя и группа."
+        )
 
     purpose: Purpose | None = None
     if purposes:
@@ -228,6 +242,7 @@ def join_submit(
                 comment=comment,
                 token=token,
                 ip_hash=hash_ip(request),
+                consent_version=settings.consent_version,
             )
         except queue_service.QueueError as exc:
             errors["queue"] = str(exc)
@@ -246,9 +261,22 @@ def join_submit(
             "group_name": group,
             "purpose_id": purpose_id,
             "comment": comment,
+            # Отметку согласия возвращаем как есть: заново читать текст
+            # из-за ошибки в группе человек не обязан.
+            "consent": consent,
         },
         status_code=422,
     )
+
+
+@router.get("/privacy", response_class=HTMLResponse)
+def privacy(request: Request):
+    """Политика обработки персональных данных и текст согласия.
+
+    Отдельная страница, а не мелкий шрифт под формой: на неё ссылается
+    галочка согласия, и она же — ответ на вопрос «а это вообще законно».
+    """
+    return templates.TemplateResponse(request, "privacy.html", {})
 
 
 @router.post("/leave")

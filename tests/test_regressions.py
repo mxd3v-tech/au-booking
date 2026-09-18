@@ -8,6 +8,7 @@ import json
 import threading
 import time
 import unittest
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from urllib.error import HTTPError
@@ -15,13 +16,21 @@ from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from openpyxl import load_workbook
-from sqlalchemy import delete, event, func, select, text
+from sqlalchemy import delete, event, func, select, text, update
 
+from app import moderation
 from app.captcha.engine import KINDS, consume_challenge, issue_challenge, verify_challenge
 from app.config import settings
+from app.main import _upgrade_schema
 from app.db import SessionLocal, engine
 from app.models import CaptchaChallenge, EntryStatus, Purpose, QueueEntry, QueueSession
-from app.security import make_admin_token, name_key, new_entry_token, write_entry_token
+from app.security import (
+    make_admin_token,
+    name_key,
+    new_entry_token,
+    validate_full_name,
+    write_entry_token,
+)
 from app.services import export, queue
 from app.templating import templates
 
@@ -124,9 +133,10 @@ class RegressionTests(unittest.TestCase):
             token=new_entry_token(),
         )
 
-    def form(self, session, challenge, name="Тестов Иван", comment=""):
+    def form(self, session, challenge, name="Тестов Иван", comment="", consent="on"):
         return {"session_id": session.id, "captcha_id": challenge.id, "full_name": name,
-                "group_name": "КТ-24-04", "purpose_id": self.purpose_id, "comment": comment}
+                "group_name": "КТ-24-04", "purpose_id": self.purpose_id, "comment": comment,
+                "consent": consent}
 
     def count(self, session):
         with SessionLocal() as db:
@@ -531,6 +541,199 @@ class RegressionTests(unittest.TestCase):
             self.assertIsNotNone(reopened)
             self.assertFalse(queue.joining_closed(reopened), "запись снова открыта")
         self.assertEqual(http("/join")[0], 200)
+
+    # ── Согласие на обработку персональных данных ───────────────────────
+
+    def test_join_without_consent_is_refused_and_nothing_is_written(self):
+        session = self.open()
+        data = self.form(session, self.captcha(), consent="")
+        code, _, body = http("/join", data)
+        self.assertEqual(code, 422)
+        self.assertIn("согласия на обработку", body.decode())
+        self.assertEqual(self.count(session), 0)
+
+    def test_consent_is_recorded_with_its_version_and_time(self):
+        session = self.open()
+        before = queue.utc_now()
+        self.assertEqual(http("/join", self.form(session, self.captcha()))[0], 303)
+        with SessionLocal() as db:
+            entry = db.scalar(select(QueueEntry).where(QueueEntry.session_id == session.id))
+            # Согласие без редакции и времени подтвердить нельзя — значит,
+            # и хранить данные было бы нечем обосновать.
+            self.assertEqual(entry.consent_version, settings.consent_version)
+            self.assertIsNotNone(entry.consent_at)
+            self.assertGreaterEqual(entry.consent_at, before.replace(microsecond=0))
+            self.assertFalse(entry.added_by_admin)
+            self.assertIn(settings.consent_version, entry.consent_label)
+
+    def test_admin_entry_needs_the_consent_checkbox(self):
+        session = self.open()
+        fields = {"full_name": "Ручнов Олег", "group_name": "КТ-24-04",
+                  "purpose_id": self.purpose_id}
+        code, headers, _ = http("/admin/entries", fields, cookie=self.admin)
+        self.assertEqual(code, 303)
+        self.assertIn("err=", headers.get("Location", ""))
+        self.assertEqual(self.count(session), 0)
+
+        code, _, _ = http("/admin/entries", {**fields, "consent": "on"}, cookie=self.admin)
+        self.assertEqual(code, 303)
+        with SessionLocal() as db:
+            entry = db.scalar(select(QueueEntry).where(QueueEntry.session_id == session.id))
+            self.assertEqual(entry.consent_version, settings.consent_version)
+            self.assertTrue(entry.added_by_admin)
+            self.assertIn("лично", entry.consent_label)
+
+    def test_consent_page_shows_operator_and_the_same_data_list(self):
+        self.open()  # форма записи открыта только при идущем приёме
+        code, _, body = http("/privacy")
+        self.assertEqual(code, 200)
+        page = body.decode()
+        self.assertIn(settings.org_name, page)
+        self.assertIn(settings.consent_version, page)
+        # Форма и страница обязаны перечислять одни и те же данные: иначе
+        # согласие перестаёт быть информированным.
+        self.assertIn("номер учебной группы", page)
+        self.assertIn("номер учебной группы", http("/join")[2].decode())
+
+    def test_export_keeps_the_consent_column(self):
+        session = self.open()
+        self.assertEqual(http("/join", self.form(session, self.captcha()))[0], 303)
+        _, _, data = http(f"/admin/sessions/{session.id}/export.csv", cookie=self.admin)
+        rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig")), delimiter=";"))
+        self.assertEqual(rows[1][-1], "Согласие на обработку данных")
+        self.assertIn(settings.consent_version, rows[2][-1])
+
+    def test_retention_removes_only_sessions_past_their_term(self):
+        fresh = self.open()
+        self.close(fresh)
+        old = self.open()
+        with SessionLocal() as db:
+            self.add(db, db.get(QueueSession, old.id))
+            db.commit()
+        self.close(old)
+        with SessionLocal() as db:
+            db.get(QueueSession, old.id).closed_at = queue.utc_now() - dt.timedelta(days=200)
+            db.commit()
+
+        with SessionLocal() as db:
+            self.assertEqual(queue.purge_expired(db, days=180), 1)
+        with SessionLocal() as db:
+            self.assertIsNone(db.get(QueueSession, old.id), "срок хранения вышел")
+            self.assertIsNotNone(db.get(QueueSession, fresh.id), "свежий приём не тронут")
+            # Записи уходят вместе с приёмом: ON DELETE CASCADE в базе.
+            self.assertEqual(
+                db.scalar(select(func.count(QueueEntry.id)).where(
+                    QueueEntry.session_id == old.id)), 0)
+            # Выключённая уборка ничего не удаляет.
+            self.assertEqual(queue.purge_expired(db, days=0), 0)
+
+    def test_consent_columns_are_added_to_an_existing_table(self):
+        """Колонки согласия должны доезжать до базы, созданной до них.
+
+        `create_all` существующую таблицу не трогает, поэтому проверяем
+        именно то, что произойдёт с рабочей базой при обновлении.
+        """
+        with SessionLocal() as db:
+            saved = db.execute(
+                select(QueueEntry.id, QueueEntry.consent_version, QueueEntry.consent_at)
+            ).all()
+            db.execute(text("ALTER TABLE queue_entry DROP COLUMN consent_version"))
+            db.execute(text("ALTER TABLE queue_entry DROP COLUMN consent_at"))
+            db.commit()
+        try:
+            _upgrade_schema()
+            with SessionLocal() as db:
+                entry = db.scalar(select(QueueEntry).limit(1))
+                if entry is not None:
+                    self.assertEqual(entry.consent_version, "")
+                    self.assertIsNone(entry.consent_at)
+            session = self.open()
+            self.assertEqual(http("/join", self.form(session, self.captcha()))[0], 303)
+        finally:
+            with SessionLocal() as db:
+                for entry_id, version, moment in saved:
+                    db.execute(
+                        update(QueueEntry)
+                        .where(QueueEntry.id == entry_id)
+                        .values(consent_version=version, consent_at=moment)
+                    )
+                db.commit()
+
+    # ── ФИО: двойные фамилии и фильтр брани ─────────────────────────────
+
+    def test_surname_in_two_words_is_accepted_and_counted_as_one_person(self):
+        session = self.open()
+        data = self.form(session, self.captcha(), name="Абдул Гамид Рашид")
+        self.assertEqual(http("/join", data)[0], 303)
+        with SessionLocal() as db:
+            entry = db.scalar(select(QueueEntry).where(QueueEntry.session_id == session.id))
+            self.assertEqual(entry.full_name, "Абдул Гамид Рашид")
+
+        # Тот же человек, написавший фамилию короче или длиннее, второго
+        # номерка не получает: сравниваются наборы слов, а не строки.
+        for name in ("Абдул Рашид", "Абдул Гамид Рашид Оглы", "Рашид Гамид Абдул"):
+            with self.subTest(name=name):
+                data = self.form(session, self.captcha(), name=name)
+                code, _, body = http("/join", data)
+                self.assertEqual(code, 422)
+                self.assertIn("уже", body.decode())
+        self.assertEqual(self.count(session), 1)
+
+    def test_patronymic_is_still_refused_but_serbian_surname_is_not(self):
+        self.assertIsNone(validate_full_name("Петрович Марко"))
+        self.assertIsNone(validate_full_name("Ильич Владимир"))
+        self.assertIsNone(validate_full_name("Ван Дейк Иван"))
+        for name in ("Иванов Иван Петрович", "Иванова Анна Сергеевна", "Иван Кузьмич Петров"):
+            with self.subTest(name=name):
+                self.assertIn("Отчество", validate_full_name(name) or "")
+        self.assertIn("не больше", validate_full_name("Де Ла Круз Мария Роза") or "")
+
+    def test_profanity_in_the_name_never_reaches_the_queue(self):
+        session = self.open()
+        for name in ("Хуев Иван", "Ху Йов", "Xyeв Пётр", "Пиздюков Иван",
+                     "Ебанько Олег", "Мудак Иванов", "Ааа Ббб"):
+            with self.subTest(name=name):
+                data = self.form(session, self.captcha(), name=name)
+                self.assertEqual(http("/join", data)[0], 422)
+        self.assertEqual(self.count(session), 0)
+
+    def test_filter_does_not_touch_real_surnames(self):
+        # Ложное срабатывание обиднее пропуска: человеку отказывают в его
+        # собственной фамилии, и он ничего не может с этим сделать.
+        for name in ("Херсонский Лев", "Мудрецов Иван", "Сукачёв Гарик",
+                     "Лебедев Алексей", "Объедков Пётр", "Мандельштам Осип",
+                     "Требухов Игорь", "Себастьянов Пётр", "Хачатрян Армен",
+                     "Тестов Иван", "Шитов Иван", "Трахтенберг Роман"):
+            with self.subTest(name=name):
+                self.assertIsNone(moderation.check_name(name))
+
+    def test_teacher_can_enter_a_name_the_filter_refuses(self):
+        """Фильтр защищает список, а не спорит с настоящей фамилией.
+
+        Студенту отказано — значит, единственный путь в очередь идёт через
+        преподавателя, и на этом пути фильтра быть не должно.
+        """
+        session = self.open()
+        data = self.form(session, self.captcha(), name="Херов Иван")
+        self.assertEqual(http("/join", data)[0], 422)
+        code, _, _ = http(
+            "/admin/entries",
+            {"full_name": "Херов Иван", "group_name": "КТ-24-04",
+             "purpose_id": self.purpose_id, "consent": "on"},
+            cookie=self.admin,
+        )
+        self.assertEqual(code, 303)
+        self.assertEqual(self.count(session), 1)
+
+    def test_extra_banned_words_come_from_settings(self):
+        stock = moderation.check_name("Шушпанчиков Иван")
+        self.assertIsNone(stock)
+        # Settings — frozen dataclass: подменяем настройки целиком,
+        # как это делают остальные проверки в этом файле.
+        extra = replace(settings, banned_names_extra="шушпанчик, ерунда")
+        with mock.patch.object(moderation, "settings", extra):
+            self.assertIsNotNone(moderation.check_name("Шушпанчиков Иван"))
+        self.assertIsNone(moderation.check_name("Шушпанчиков Иван"))
 
     def test_static_is_revalidated_after_a_rebuild(self):
         code, headers, _ = http("/static/js/app.js")

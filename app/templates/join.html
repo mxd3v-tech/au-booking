@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/pd.html" import data_list %}
 {% block title %}Встать в очередь{% endblock %}
 
 {% block content %}
@@ -48,7 +49,10 @@
     {% if errors.full_name %}
       <div class="field__error">{{ errors.full_name }}</div>
     {% else %}
-      <div class="field__hint">Отчество не нужно — в очереди оно только мешает</div>
+      <div class="field__hint">
+        Отчество не нужно — в очереди оно только мешает. Фамилию из двух слов
+        пишите как есть: «Абдул Гамид Рашид», «Ван Дейк Иван»
+      </div>
     {% endif %}
   </div>
 
@@ -107,6 +111,29 @@
     {% include "partials/captcha.html" %}
   </div>
 
+  {# Согласие на обработку данных: без отметки сервер запись не примет.
+     Сам текст и состав данных живут в partials/pd.html — рядом с формой
+     короткая формулировка, полная лежит на /privacy. #}
+  <div class="field">
+    <label class="checkbox">
+      <input type="checkbox" name="consent" value="on" data-consent
+             {% if values.consent == 'on' %}checked{% endif %}>
+      <span>
+        Согласен на обработку персональных данных ({{ data_list() }}) для
+        записи в живую очередь.
+        <a href="/privacy#consent" target="_blank" rel="noopener">Полный текст согласия</a>
+      </span>
+    </label>
+    {% if errors.consent %}
+      <div class="field__error">{{ errors.consent }}</div>
+    {% else %}
+      <div class="field__hint">
+        Отозвать согласие можно в любой момент — скажите преподавателю, и
+        запись удалят
+      </div>
+    {% endif %}
+  </div>
+
   <button type="submit" class="btn btn--primary btn--lg btn--block is-disabled"
           data-join-submit disabled>
     Решите задание, чтобы встать в очередь
@@ -115,6 +142,7 @@
   <p class="field__hint" style="margin-top:var(--space-4)">
     Фамилию, имя и группу увидят все, кто стоит в этой очереди, — так работает живая очередь.
     Цель визита и комментарий видит только {{ teacher_name }}.
+    Подробнее — <a href="/privacy">об обработке персональных данных</a>.
   </p>
 </form>
 

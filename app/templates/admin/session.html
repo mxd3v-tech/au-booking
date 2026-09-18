@@ -36,7 +36,7 @@
 <div class="table-scroll">
   <table class="data">
     <thead>
-      <tr><th>№</th><th>Фамилия и имя</th><th>Группа</th><th>С чем приходил</th><th>Статус</th><th>Встал</th></tr>
+      <tr><th>№</th><th>Фамилия и имя</th><th>Группа</th><th>С чем приходил</th><th>Статус</th><th>Встал</th><th>Согласие</th></tr>
     </thead>
     <tbody>
       {% for entry in entries %}
@@ -50,6 +50,13 @@
         </td>
         <td>{{ entry.status | status_label }}</td>
         <td class="muted nowrap">{{ entry.created_at | hm }}</td>
+        <td class="muted nowrap">
+          {%- if entry.consent_at -%}
+          {{ entry.consent_label }}<br>{{ entry.consent_at | dtime }}
+          {%- else -%}
+          — <span title="Запись сделана до того, как сервис стал спрашивать согласие">нет отметки</span>
+          {%- endif -%}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
