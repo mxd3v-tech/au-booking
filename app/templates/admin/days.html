@@ -1,0 +1,92 @@
+{% extends "admin/base.html" %}
+{% block title %}Дни приёма{% endblock %}
+
+{% block admin_content %}
+<h1>Дни и окна приёма</h1>
+
+<section class="section">
+  <div class="card">
+    <h2>Назначить день</h2>
+    <p class="muted" style="font-size:var(--text-14)">
+      Укажите дату и, если уже знаете, окно приёма — оно сразу нарежется на слоты.
+      Окна можно добавить и потом, их в одном дне может быть несколько.
+    </p>
+    <form method="post" action="/admin/days">
+      <div class="form-row">
+        <div class="field">
+          <label class="field__label" for="date">Дата</label>
+          <input class="input" type="date" id="date" name="date" value="{{ default_date }}" required>
+        </div>
+        <div class="field">
+          <label class="field__label" for="room">Кабинет</label>
+          <input class="input" type="text" id="room" name="room" placeholder="312" maxlength="64">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label class="field__label" for="start_time">Начало окна</label>
+          <input class="input" type="time" id="start_time" name="start_time" value="14:00">
+        </div>
+        <div class="field">
+          <label class="field__label" for="end_time">Конец окна</label>
+          <input class="input" type="time" id="end_time" name="end_time" value="16:00">
+        </div>
+        <div class="field">
+          <label class="field__label" for="slot_minutes">Минут на приём</label>
+          <input class="input" type="number" id="slot_minutes" name="slot_minutes"
+                 value="5" min="1" max="120" step="1">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field__label" for="note">Примечание для студентов</label>
+        <input class="input" type="text" id="note" name="note"
+               placeholder="Приносите распечатанный отчёт" maxlength="300">
+      </div>
+      <button type="submit" class="btn btn--primary">Создать день</button>
+    </form>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Все дни</h2>
+  {% if days %}
+  <div class="table-scroll">
+    <table class="data">
+      <thead>
+        <tr><th>Дата</th><th>Окна</th><th>Слоты</th><th>Записей</th><th>Кабинет</th><th>Статус</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for day in days %}
+        <tr>
+          <td>
+            <a href="/admin/days/{{ day.id }}"><strong>{{ day.date.strftime('%d.%m.%Y') }}</strong></a><br>
+            <span class="muted" style="font-size:var(--text-12)">{{ day.date | dfull }}</span>
+          </td>
+          <td class="mono" style="font-size:var(--text-12)">
+            {% for window in day.windows %}
+              {{ window.start_time.strftime('%H:%M') }}–{{ window.end_time.strftime('%H:%M') }}
+              · {{ window.slot_minutes }} мин{% if not loop.last %}<br>{% endif %}
+            {% else %}—{% endfor %}
+          </td>
+          <td>{{ counts.get(day.id, 0) }}</td>
+          <td>{{ booked.get(day.id, 0) }}</td>
+          <td>{{ day.room or '—' }}</td>
+          <td>
+            {% if day.date < today %}<span class="badge">Прошёл</span>
+            {% elif day.is_published %}<span class="badge badge--free">Опубликован</span>
+            {% else %}<span class="badge badge--warn">Черновик</span>{% endif %}
+          </td>
+          <td><a class="btn btn--ghost btn--sm" href="/admin/days/{{ day.id }}">Открыть</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <div class="empty__title">Дней ещё нет</div>
+    <p class="muted" style="margin:0 auto">Создайте первый день формой выше.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

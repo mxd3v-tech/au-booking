@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% set path = request.url.path %}
+
+{% block container_class %}{% endblock %}
+
+{% block nav %}
+<a href="/">На сайт</a>
+{% endblock %}
+
+{% block content %}
+<nav class="admin-nav no-print" aria-label="Разделы панели">
+  <a href="/admin" class="{{ 'is-active' if path == '/admin' or path == '/admin/' }}">Сводка</a>
+  <a href="/admin/days" class="{{ 'is-active' if path.startswith('/admin/days') }}">Дни и окна</a>
+  <a href="/admin/bookings" class="{{ 'is-active' if path.startswith('/admin/bookings') }}">Записи</a>
+  <a href="/admin/purposes" class="{{ 'is-active' if path.startswith('/admin/purposes') }}">Цели визита</a>
+  <a href="/admin/captcha" class="{{ 'is-active' if path.startswith('/admin/captcha') }}">Капча</a>
+  <form method="post" action="/admin/logout" class="inline-form" style="margin-left:auto">
+    <button type="submit" class="btn btn--ghost btn--sm">Выйти</button>
+  </form>
+</nav>
+
+{% if ok %}<div class="callout callout--ok no-print"><p style="margin:0">{{ ok }}</p></div>{% endif %}
+{% if err %}<div class="callout callout--err no-print"><p style="margin:0">{{ err }}</p></div>{% endif %}
+
+{% block admin_content %}{% endblock %}
+{% endblock %}

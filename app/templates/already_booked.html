@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}У вас уже есть запись{% endblock %}
+
+{% block content %}
+<div class="empty">
+  <div class="empty__title">У вас уже есть активная запись</div>
+  <p class="muted" style="margin:0 auto var(--space-5)">
+    {{ booking.full_name }}, {{ booking.group_name }} — {{ day.date | dfull }},
+    {{ starts_at | hm }}. Одновременно можно держать
+    {{ settings.max_active_bookings }} бронь. Отмените старую, если хотите перезаписаться:
+    так слот достанется тому, кто его ждёт.
+  </p>
+  <div class="btn-row" style="justify-content:center">
+    <a class="btn btn--primary" href="/b/{{ booking.cancel_token }}">Открыть талон и отменить</a>
+    <a class="btn btn--ghost" href="/">К расписанию</a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}День не найден{% endblock %}
+
+{% block content %}
+<div class="empty">
+  <div class="empty__title">На {{ day_date.strftime('%d.%m.%Y') }} приёма нет</div>
+  <p class="muted" style="margin:0 auto var(--space-5)">
+    Либо день ещё не открыт, либо его сняли с публикации. Посмотрите ближайшие даты.
+  </p>
+  <a class="btn btn--primary" href="/">К расписанию</a>
+</div>
+{% endblock %}

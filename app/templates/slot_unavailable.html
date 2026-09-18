@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Слот недоступен{% endblock %}
+
+{% block content %}
+<div class="empty">
+  <div class="empty__title">
+    {% if state == 'taken' %}Этот слот уже заняли
+    {% elif state == 'blocked' %}Слот закрыт преподавателем
+    {% else %}Время записи на этот слот истекло{% endif %}
+  </div>
+  <p class="muted" style="margin:0 auto var(--space-5)">
+    {% if state == 'taken' %}
+      Кто-то оказался быстрее буквально на секунды. Свободные окошки ещё есть — посмотрите сетку.
+    {% elif state == 'blocked' %}
+      Преподаватель закрыл это время. Выберите другое — соседние слоты обычно свободны.
+    {% else %}
+      Запись закрывается за {{ settings.booking_lead_minutes }} мин до начала приёма,
+      чтобы очередь не собиралась на ходу.
+    {% endif %}
+  </p>
+  <div class="btn-row" style="justify-content:center">
+    <a class="btn btn--primary" href="/d/{{ day.date.isoformat() }}">Вернуться к сетке времени</a>
+    <a class="btn btn--ghost" href="/">Все дни приёма</a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,184 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ day.date.strftime('%d.%m.%Y') }} — приём{% endblock %}
+
+{% block admin_content %}
+<p><a href="/admin/days" class="muted">← Все дни</a></p>
+
+<h1 style="text-transform:capitalize">{{ day.date | dfull }}</h1>
+
+<div class="btn-row" style="margin-bottom:var(--space-6)">
+  <a class="btn btn--ghost" href="/admin/days/{{ day.id }}/print" target="_blank" rel="noopener">Печать списка</a>
+  <a class="btn btn--ghost" href="/admin/days/{{ day.id }}/export.xlsx">Выгрузить XLSX</a>
+  <a class="btn btn--ghost" href="/admin/days/{{ day.id }}/export.csv">Выгрузить CSV</a>
+  <a class="btn btn--ghost" href="/d/{{ day.date.isoformat() }}" target="_blank" rel="noopener">Как видят студенты</a>
+</div>
+
+<div class="grid grid--2">
+  <section class="card">
+    <h2>Параметры дня</h2>
+    <form method="post" action="/admin/days/{{ day.id }}/update">
+      <div class="field">
+        <label class="field__label" for="room">Кабинет</label>
+        <input class="input" type="text" id="room" name="room" value="{{ day.room }}" maxlength="64">
+      </div>
+      <div class="field">
+        <label class="field__label" for="note">Примечание для студентов</label>
+        <input class="input" type="text" id="note" name="note" value="{{ day.note }}" maxlength="300">
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" name="is_published" {% if day.is_published %}checked{% endif %}>
+          <span>Опубликован — день виден студентам и открыт для записи</span>
+        </label>
+      </div>
+      <button type="submit" class="btn btn--primary">Сохранить</button>
+    </form>
+
+    <hr>
+    <form method="post" action="/admin/days/{{ day.id }}/delete"
+          data-confirm="Удалить день {{ day.date.strftime('%d.%m.%Y') }} со всеми слотами?">
+      <button type="submit" class="btn btn--danger btn--sm">Удалить день</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Добавить окно</h2>
+    <p class="muted" style="font-size:var(--text-14)">
+      Окно нарезается на слоты равной длины. Несколько окон в дне — это нормально:
+      например, до пары и после.
+    </p>
+    <form method="post" action="/admin/days/{{ day.id }}/windows">
+      <div class="form-row">
+        <div class="field">
+          <label class="field__label" for="w_start">Начало</label>
+          <input class="input" type="time" id="w_start" name="start_time" value="14:00" required>
+        </div>
+        <div class="field">
+          <label class="field__label" for="w_end">Конец</label>
+          <input class="input" type="time" id="w_end" name="end_time" value="16:00" required>
+        </div>
+        <div class="field">
+          <label class="field__label" for="w_min">Минут</label>
+          <input class="input" type="number" id="w_min" name="slot_minutes" value="5" min="1" max="120">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field__label" for="w_title">Название <span class="muted">(необязательно)</span></label>
+        <input class="input" type="text" id="w_title" name="title" placeholder="После третьей пары" maxlength="120">
+      </div>
+      <button type="submit" class="btn btn--primary">Добавить окно</button>
+    </form>
+  </section>
+</div>
+
+<section class="section" style="margin-top:var(--space-6)">
+  <h2>Окна этого дня</h2>
+  {% if day.windows %}
+  <div class="table-scroll">
+    <table class="data">
+      <thead><tr><th>Окно</th><th>Слот</th><th>Название</th><th>Изменить</th><th></th></tr></thead>
+      <tbody>
+        {% for window in day.windows %}
+        <tr>
+          <td class="time">
+            <input class="input" style="min-height:38px;width:110px;display:inline-block"
+                   type="time" name="start_time" value="{{ window.start_time.strftime('%H:%M') }}" form="w{{ window.id }}">
+            <input class="input" style="min-height:38px;width:110px;display:inline-block"
+                   type="time" name="end_time" value="{{ window.end_time.strftime('%H:%M') }}" form="w{{ window.id }}">
+          </td>
+          <td>
+            <input class="input" style="min-height:38px;width:80px" type="number" min="1" max="120"
+                   name="slot_minutes" value="{{ window.slot_minutes }}" form="w{{ window.id }}">
+          </td>
+          <td>
+            <input class="input" style="min-height:38px" type="text" name="title"
+                   value="{{ window.title }}" maxlength="120" form="w{{ window.id }}">
+          </td>
+          <td><button type="submit" class="btn btn--sm btn--primary" form="w{{ window.id }}">Пересобрать</button></td>
+          <td>
+            <form method="post" action="/admin/windows/{{ window.id }}/delete" class="inline-form"
+                  data-confirm="Удалить окно и его свободные слоты?">
+              <button type="submit" class="btn btn--sm btn--danger">Удалить</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {# формы вынесены из таблицы: поля связаны с ними атрибутом form #}
+  {% for window in day.windows %}
+  <form method="post" action="/admin/windows/{{ window.id }}/update" id="w{{ window.id }}"></form>
+  {% endfor %}
+  <p class="field__hint">
+    При пересборке слоты с активными бронями сохраняются — время студенту не меняется само собой.
+  </p>
+  {% else %}
+  <div class="empty"><div class="empty__title">Окон пока нет</div>
+    <p class="muted" style="margin:0 auto">Добавьте окно — слоты появятся сразу.</p></div>
+  {% endif %}
+</section>
+
+<section class="section">
+  <div style="display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap">
+    <h2 style="margin:0">Слоты</h2>
+    <span class="badge badge--free">Свободно: {{ free_count }} из {{ views | length }}</span>
+  </div>
+
+  {% if views %}
+  <div class="table-scroll" style="margin-top:var(--space-4)">
+    <table class="data">
+      <thead><tr><th>Время</th><th>Кто записан</th><th>Группа</th><th>Цель и комментарий</th><th>Статус</th><th>Действия</th></tr></thead>
+      <tbody>
+        {% for view in views %}
+        {% set booking = view.slot.active_booking %}
+        <tr>
+          <td class="time">{{ view.range_label }}</td>
+          <td>{{ booking.full_name if booking else '—' }}</td>
+          <td class="mono">{{ booking.group_name if booking else '' }}</td>
+          <td style="max-width:320px">
+            {% if booking %}
+              {{ booking.purpose.title if booking.purpose else '—' }}
+              {% if booking.comment %}<br><span class="muted" style="font-size:var(--text-12)">{{ booking.comment }}</span>{% endif %}
+            {% endif %}
+          </td>
+          <td>
+            {% if booking %}
+              <span class="badge {{ 'badge--ok' if booking.status.value == 'done' else ('badge--danger' if booking.status.value == 'no_show' else '') }}">
+                {{ booking.status | status_label }}</span>
+            {% else %}
+              <span class="badge {{ 'badge--free' if view.state == 'free' else 'badge--busy' }}">{{ view.state_label }}</span>
+            {% endif %}
+          </td>
+          <td>
+            <div class="btn-row" style="gap:var(--space-2)">
+              {% if booking %}
+                {% for value, label in [('done','Принят'), ('no_show','Неявка'), ('cancelled','Отменить')] %}
+                <form method="post" action="/admin/bookings/{{ booking.id }}/status" class="inline-form">
+                  <input type="hidden" name="status" value="{{ value }}">
+                  <input type="hidden" name="back" value="/admin/days/{{ day.id }}">
+                  <button type="submit" class="btn btn--sm {{ 'btn--primary' if booking.status.value == value else 'btn--ghost' }}">{{ label }}</button>
+                </form>
+                {% endfor %}
+              {% else %}
+                <form method="post" action="/admin/slots/{{ view.slot.id }}/toggle" class="inline-form">
+                  <button type="submit" class="btn btn--sm btn--ghost">
+                    {{ 'Открыть' if view.slot.is_blocked else 'Закрыть' }}
+                  </button>
+                </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty" style="margin-top:var(--space-4)">
+    <div class="empty__title">Слотов нет</div>
+    <p class="muted" style="margin:0 auto">Добавьте окно приёма — слоты нарежутся автоматически.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

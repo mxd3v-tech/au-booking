@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Страница не найдена{% endblock %}
+
+{% block content %}
+<div class="empty">
+  <div class="empty__title">404 — маршрут не найден</div>
+  <p class="muted" style="margin:0 auto var(--space-5)">
+    Пакет ушёл, а обратного маршрута нет. Вернитесь к расписанию.
+  </p>
+  <a class="btn btn--primary" href="/">К расписанию</a>
+</div>
+{% endblock %}

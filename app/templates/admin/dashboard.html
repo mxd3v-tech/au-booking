@@ -1,0 +1,97 @@
+{% extends "admin/base.html" %}
+{% block title %}Сводка{% endblock %}
+
+{% block admin_content %}
+<h1>Сводка</h1>
+
+<div class="stat-row">
+  <div class="stat">
+    <div class="stat__value">{{ today_bookings | length }}</div>
+    <div class="stat__label">записей на сегодня</div>
+  </div>
+  <div class="stat">
+    <div class="stat__value">{{ summaries | sum(attribute='free') }}</div>
+    <div class="stat__label">свободных слотов впереди</div>
+  </div>
+  <div class="stat">
+    <div class="stat__value">{{ totals.get('Принят', 0) }}</div>
+    <div class="stat__label">принято всего</div>
+  </div>
+  <div class="stat">
+    <div class="stat__value">{{ totals.get('Неявка', 0) }}</div>
+    <div class="stat__label">неявок всего</div>
+  </div>
+</div>
+
+<section class="section">
+  <h2>Сегодня, {{ today.strftime('%d.%m.%Y') }}</h2>
+  {% if today_bookings %}
+  <div class="table-scroll">
+    <table class="data">
+      <thead>
+        <tr><th>Время</th><th>ФИО</th><th>Группа</th><th>Цель</th><th>Статус</th><th>Отметка</th></tr>
+      </thead>
+      <tbody>
+        {% for booking in today_bookings %}
+        <tr>
+          <td class="time">{{ booking.slot.starts_at | hm }}</td>
+          <td>{{ booking.full_name }}{% if booking.comment %}<br><span class="muted" style="font-size:var(--text-12)">{{ booking.comment }}</span>{% endif %}</td>
+          <td class="mono">{{ booking.group_name }}</td>
+          <td>{{ booking.purpose.title if booking.purpose else '—' }}</td>
+          <td>
+            <span class="badge {{ 'badge--ok' if booking.status.value == 'done' else ('badge--danger' if booking.status.value == 'no_show' else '') }}">
+              {{ booking.status | status_label }}
+            </span>
+          </td>
+          <td>
+            <div class="btn-row" style="gap:var(--space-2)">
+              {% for value, label in [('done','Принят'), ('no_show','Неявка'), ('booked','Ожидает')] %}
+              <form method="post" action="/admin/bookings/{{ booking.id }}/status" class="inline-form">
+                <input type="hidden" name="status" value="{{ value }}">
+                <input type="hidden" name="back" value="/admin">
+                <button type="submit" class="btn btn--sm {{ 'btn--primary' if booking.status.value == value else 'btn--ghost' }}">{{ label }}</button>
+              </form>
+              {% endfor %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <div class="empty__title">На сегодня записей нет</div>
+    <p class="muted" style="margin:0 auto">Либо день не назначен, либо группа ещё не проснулась.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="section">
+  <h2>Ближайшие дни</h2>
+  {% if summaries %}
+  <div class="grid grid--3">
+    {% for summary in summaries %}
+    <a class="card card--hover day-card" href="/admin/days/{{ summary.day.id }}">
+      <div>
+        <div class="day-card__date">{{ summary.day.date | dshort }}</div>
+        <div class="day-card__weekday">{{ summary.day.date | dfull }}</div>
+      </div>
+      <div class="day-card__meter"><span style="width: {{ (100 * summary.taken / summary.total) | round | int }}%"></span></div>
+      <div>
+        <span class="badge badge--free">Свободно {{ summary.free }}</span>
+        <span class="badge">Занято {{ summary.taken }}</span>
+        {% if not summary.day.is_published %}<span class="badge badge--warn">Черновик</span>{% endif %}
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">
+    <div class="empty__title">Впереди пусто</div>
+    <p class="muted" style="margin:0 auto var(--space-4)">Назначьте день приёма — студенты увидят его сразу.</p>
+    <a class="btn btn--primary" href="/admin/days">Назначить день</a>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
