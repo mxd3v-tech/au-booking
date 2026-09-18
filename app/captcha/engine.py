@@ -9,14 +9,17 @@ import datetime as dt
 import random
 import uuid
 
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.captcha import bank
 from app.config import settings
 from app.models import CaptchaChallenge
 
-KINDS = ("truth_myth", "net_scheme", "subnet", "quiz")
+KINDS = (
+    "truth_myth", "net_scheme", "subnet", "quiz",
+    "ports", "order_steps", "permissions", "logs",
+)
 
 TRUTH_MYTH_CARDS = 3
 SUBNET_MIN_PREFIX = 24
@@ -91,16 +94,62 @@ def _build_subnet() -> tuple[dict, dict]:
 
 
 def _build_quiz() -> tuple[dict, dict]:
-    question, options, correct_index, explain = random.choice(bank.QUIZ)
+    return _build_choice("quiz", "Один верный ответ", random.choice(bank.QUIZ))
+
+
+def _build_choice(kind: str, title: str, case: tuple) -> tuple[dict, dict]:
+    question, options, correct_index, explain = case
     order = list(range(len(options)))
     random.shuffle(order)
     payload = {
-        "kind": "quiz",
-        "title": "Один верный ответ",
+        "kind": kind,
+        "title": title,
         "intro": question,
         "options": [options[i] for i in order],
     }
     return payload, {"index": order.index(correct_index), "explain": explain}
+
+
+def _build_ports() -> tuple[dict, dict]:
+    services = random.sample(bank.PORT_SERVICES, 3)
+    ports = [port for _, port in services]
+    random.shuffle(ports)
+    return {
+        "kind": "ports",
+        "title": "Сервис ищет порт",
+        "intro": "Сопоставьте три сервиса с портами сервера по умолчанию.",
+        "services": [name for name, _ in services],
+        "ports": ports,
+    }, {
+        "values": [port for _, port in services],
+        "explain": "Стандартные порты: " + "; ".join(f"{name} — {port}" for name, port in services) + ".",
+    }
+
+
+def _build_order_steps() -> tuple[dict, dict]:
+    question, steps, explain = random.choice(bank.ORDER_CASES)
+    order = list(range(len(steps)))
+    random.shuffle(order)
+    # Не выдаём уже собранную последовательность.
+    if order == list(range(len(steps))):
+        order = order[1:] + order[:1]
+    return {
+        "kind": "order_steps",
+        "title": "Что за чем",
+        "intro": question,
+        "steps": [steps[i] for i in order],
+    }, {"values": [order.index(i) for i in range(len(steps))], "explain": explain}
+
+
+def _build_permissions() -> tuple[dict, dict]:
+    return _build_choice("permissions", "Права без 777", random.choice(bank.PERMISSION_CASES))
+
+
+def _build_logs() -> tuple[dict, dict]:
+    log, question, options, index, explain = random.choice(bank.LOG_CASES)
+    payload, answer = _build_choice("logs", "Читаем журнал", (question, options, index, explain))
+    payload["log"] = log
+    return payload, answer
 
 
 _BUILDERS = {
@@ -108,18 +157,24 @@ _BUILDERS = {
     "net_scheme": _build_net_scheme,
     "subnet": _build_subnet,
     "quiz": _build_quiz,
+    "ports": _build_ports,
+    "order_steps": _build_order_steps,
+    "permissions": _build_permissions,
+    "logs": _build_logs,
 }
 
 
-def build_payload(kind: str | None = None) -> tuple[str, dict, dict]:
-    kind = kind if kind in _BUILDERS else random.choice(KINDS)
+def build_payload(kind: str | None = None, *, exclude_kind: str | None = None) -> tuple[str, dict, dict]:
+    kind = kind if kind in _BUILDERS and kind != exclude_kind else random.choice(
+        [candidate for candidate in KINDS if candidate != exclude_kind]
+    )
     payload, answer = _BUILDERS[kind]()
     return kind, payload, answer
 
 
 # ── Жизненный цикл задания ──────────────────────────────────────────────
 
-def issue_challenge(db: Session, kind: str | None = None) -> CaptchaChallenge:
+def issue_challenge(db: Session, kind: str | None = None, *, exclude_kind: str | None = None) -> CaptchaChallenge:
     """Выдать новое задание и попутно прибрать протухшие."""
     now = dt.datetime.now(dt.timezone.utc)
     db.execute(
@@ -127,7 +182,7 @@ def issue_challenge(db: Session, kind: str | None = None) -> CaptchaChallenge:
             CaptchaChallenge.expires_at < now - dt.timedelta(hours=1)
         )
     )
-    kind, payload, answer = build_payload(kind)
+    kind, payload, answer = build_payload(kind, exclude_kind=exclude_kind)
     challenge = CaptchaChallenge(
         id=str(uuid.uuid4()),
         kind=kind,
@@ -147,8 +202,8 @@ def _check(challenge: CaptchaChallenge, submitted: str) -> tuple[bool, str]:
 
     if challenge.kind == "truth_myth":
         expected = answer["values"]
-        parts = [p for p in submitted.split(",") if p != ""]
-        if len(parts) != len(expected):
+        parts = submitted.split(",")
+        if len(parts) != len(expected) or any(p not in {"0", "1"} for p in parts):
             return False, "Нужно ответить на все три утверждения."
         given = [p == "1" for p in parts]
         wrong = [i for i, (g, e) in enumerate(zip(given, expected)) if g != e]
@@ -168,7 +223,14 @@ def _check(challenge: CaptchaChallenge, submitted: str) -> tuple[bool, str]:
         ok = prefix == answer["prefix"]
         return ok, answer["explain"]
 
-    if challenge.kind == "quiz":
+    if challenge.kind in {"ports", "order_steps"}:
+        try:
+            values = [int(part) for part in submitted.split(",")]
+        except ValueError:
+            return False, "Ответьте на задание полностью."
+        return values == answer["values"], answer["explain"]
+
+    if challenge.kind in {"quiz", "permissions", "logs"}:
         try:
             index = int(submitted)
         except ValueError:
@@ -181,10 +243,17 @@ def _check(challenge: CaptchaChallenge, submitted: str) -> tuple[bool, str]:
 
 def verify_challenge(db: Session, challenge_id: str, submitted: str) -> dict:
     """Проверить ответ студента. Ответ всегда сверяется на сервере."""
-    challenge = db.get(CaptchaChallenge, challenge_id or "")
+    # Проверка ответа и счётчик попыток сериализованы с погашением задания.
+    challenge = db.scalar(
+        select(CaptchaChallenge)
+        .where(CaptchaChallenge.id == (challenge_id or ""))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     now = dt.datetime.now(dt.timezone.utc)
 
     if challenge is None or challenge.consumed or challenge.expires_at < now:
+        db.rollback()
         return {
             "ok": False,
             "expired": True,
@@ -193,6 +262,7 @@ def verify_challenge(db: Session, challenge_id: str, submitted: str) -> dict:
         }
 
     if challenge.solved:
+        db.rollback()
         return {"ok": True, "title": "Уже принято", "text": "Можно отправлять форму."}
 
     challenge.attempts += 1
@@ -207,32 +277,32 @@ def verify_challenge(db: Session, challenge_id: str, submitted: str) -> dict:
             "text": explain,
         }
 
-    exhausted = challenge.attempts >= settings.captcha_max_attempts
-    if exhausted:
-        # Гасим задание, иначе лимит попыток был бы просто надписью:
-        # подобрать ответ перебором можно было бы и после него.
-        challenge.consumed = True
+    # После первой ошибки задание больше не принимается, даже прямым запросом.
+    challenge.consumed = True
     db.commit()
     return {
         "ok": False,
-        "expired": exhausted,
+        "expired": True,
         "title": random.choice(bank.WRONG_TITLES),
         "text": explain,
-        "attempts_left": max(settings.captcha_max_attempts - challenge.attempts, 0),
     }
 
 
 def consume_challenge(db: Session, challenge_id: str) -> bool:
     """Погасить решённое задание при отправке формы. Одно задание — одна запись."""
-    challenge = db.get(CaptchaChallenge, challenge_id or "")
-    now = dt.datetime.now(dt.timezone.utc)
-    if (
-        challenge is None
-        or not challenge.solved
-        or challenge.consumed
-        or challenge.expires_at < now
-    ):
-        return False
-    challenge.consumed = True
+    # Условие перепроверяется PostgreSQL после ожидания конкурентного UPDATE.
+    # Даже если оба запроса пришли одновременно, строку получит только один.
+    consumed_id = db.scalar(
+        update(CaptchaChallenge)
+        .where(
+            CaptchaChallenge.id == (challenge_id or ""),
+            CaptchaChallenge.solved.is_(True),
+            CaptchaChallenge.consumed.is_(False),
+            CaptchaChallenge.expires_at >= func.clock_timestamp(),
+        )
+        .values(consumed=True)
+        .returning(CaptchaChallenge.id)
+        .execution_options(synchronize_session=False)
+    )
     db.commit()
-    return True
+    return consumed_id is not None

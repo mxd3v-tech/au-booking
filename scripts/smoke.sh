@@ -1,23 +1,43 @@
 #!/bin/bash
-# Сквозная проверка живой очереди: админка → приём → QR → капча → номерок → история
+# Сквозная проверка в отдельном стеке: рабочая БД и .env не используются.
 set -u
-BASE=${BASE:-http://127.0.0.1:8080}
 CD=$(cd "$(dirname "$0")/.." && pwd)
-A=$(mktemp); U1=$(mktemp); U2=$(mktemp); U3=$(mktemp); S=$(mktemp)
+for tool in docker curl python3 node; do
+  command -v "$tool" >/dev/null || { echo "Нужен $tool для самопроверки" >&2; exit 1; }
+done
+PROJECT="au-queue-test-$(date +%s)-$$"
+compose=(docker compose --env-file /dev/null --project-directory "$CD"
+         -f "$CD/scripts/compose.test.yml" -p "$PROJECT")
+TMP=$(mktemp -d) || exit 1
+cleanup(){
+  local result=$?
+  trap - EXIT
+  if [ "$result" != 0 ]; then "${compose[@]}" logs --no-color app; fi
+  "${compose[@]}" down --volumes --remove-orphans || result=1
+  rm -rf -- "$TMP"
+  exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+"${compose[@]}" up -d --build --wait --wait-timeout 90 || exit 1
+PORT=$("${compose[@]}" port app 8000) || exit 1
+BASE="http://$PORT"
+A="$TMP/admin"; U1="$TMP/user1"; U2="$TMP/user2"; U3="$TMP/user3"; S="$TMP/response"
+touch "$A" "$U1" "$U2" "$U3" "$S" || exit 1
 pass=0; fail=0
 ok(){ echo "  ok   $1"; pass=$((pass+1)); }
 no(){ echo "  FAIL $1"; fail=$((fail+1)); }
-sql(){ docker compose --project-directory "$CD" exec -T db psql -U au_queue -t -A -c "$1"; }
-
-# Учётные данные берём из .env, чтобы тест не расходился с настройками стенда
-envval(){ grep -E "^$1=" "$CD/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' ; }
-ADMIN_USER=$(envval ADMIN_USERNAME); ADMIN_USER=${ADMIN_USER:-admin}
-ADMIN_PASS=$(envval ADMIN_PASSWORD); ADMIN_PASS=${ADMIN_PASS:-admin}
+sql(){ "${compose[@]}" exec -T db psql -U au_queue -d au_queue_test -v ON_ERROR_STOP=1 -t -A -c "$1"; }
+ADMIN_USER=smoke-admin
+ADMIN_PASS=smoke-password
 
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
 echo "== 0. Чистая площадка"
-sql "delete from queue_session" >/dev/null && ok "прошлые приёмы убраны"
+n=$(sql "select count(*) from queue_session") || exit 1
+[ "$n" = 0 ] && ok "отдельная тестовая БД пуста" || { no "тестовая БД не пуста"; exit 1; }
 
 echo "== 1. Вход в админку"
 c=$(code -c "$A" -X POST "$BASE/admin/login" \
@@ -60,35 +80,55 @@ grep -q "14:00–16:00" "$S" && ok "время приёма показано" ||
 grep -q "Сегодня только пересдачи" "$S" && ok "заметка показана" || no "заметки нет"
 grep -q "Встать в очередь" "$S" && ok "кнопка записи на месте" || no "нет кнопки записи"
 
+# Ответ любого типа задания так, как его отправил бы браузер.
 solve(){ sql "select kind || '|' || answer::text from captcha_challenge where id='$1'" | python3 -c '
 import sys, json
 kind, raw = sys.stdin.read().strip().split("|", 1)
 a = json.loads(raw)
-print({"truth_myth": lambda: ",".join("1" if v else "0" for v in a["values"]),
-       "net_scheme": lambda: a["node"],
-       "subnet":     lambda: str(a["prefix"]),
-       "quiz":       lambda: str(a["index"])}[kind]())'; }
+if "values" in a:
+    print(",".join("1" if v else "0" for v in a["values"]) if kind == "truth_myth"
+          else ",".join(str(v) for v in a["values"]))
+elif "node" in a:
+    print(a["node"])
+elif "prefix" in a:
+    print(a["prefix"])
+else:
+    print(a["index"])'; }
 cid_of(){ grep -o 'data-id="[^"]*"' "$1" | head -1 | cut -d'"' -f2; }
+field(){ python3 -c 'import sys,json;d=json.load(sys.stdin)
+for key in sys.argv[1:]: d = d.get(key) or {}
+print(d if isinstance(d, str) else "")' "$@"; }
 
-echo "== 5. Капча: все четыре типа"
-for kind in truth_myth net_scheme subnet quiz; do
+# Типы берём из админки: добавится новый — он сразу попадёт в проверку.
+curl -s -b "$A" "$BASE/admin/captcha" > "$S"
+KINDS=$(grep -o 'data-captcha-kind="[^"]*"' "$S" | cut -d'"' -f2)
+echo "== 5. Капча: все типы ($(echo "$KINDS" | wc -w | tr -d ' ') шт.)"
+for kind in $KINDS; do
   curl -s -b "$A" "$BASE/admin/captcha?kind=$kind" > "$S"
   cid=$(cid_of "$S")
+  grep -q "data-kind=\"$kind\"" "$S" || no "$kind: админка показала не тот тип"
   grep -q '"answer"' "$S" && no "$kind: правильный ответ утёк в HTML!" || ok "$kind: ответа нет в разметке"
   r=$(curl -s -X POST "$BASE/api/captcha/$cid" --data-urlencode "answer=$(solve "$cid")")
   echo "$r" | grep -q '"ok":true' && ok "$kind: верный ответ принят" || no "$kind: $r"
 done
 
-echo "== 6. Капча: ошибка, разбор и лимит попыток"
+echo "== 6. Капча: одна попытка, разбор и замена другого типа"
 curl -s -b "$A" "$BASE/admin/captcha?kind=quiz" > "$S"; cid=$(cid_of "$S")
 right=$(solve "$cid"); wrong=$(( (right + 1) % 4 ))
 r=$(curl -s -X POST "$BASE/api/captcha/$cid" -d "answer=$wrong")
 echo "$r" | grep -q '"ok":false' && ok "неверный ответ отклонён" || no "неверный принят: $r"
 len=$(echo "$r" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("text","")))')
 [ "$len" -gt 40 ] && ok "есть разбор ошибки ($len симв.)" || no "разбор пустой"
-for i in 1 2 3; do curl -s -o /dev/null -X POST "$BASE/api/captcha/$cid" -d "answer=$wrong"; done
+next_kind=$(echo "$r" | field replacement kind)
+[ -n "$next_kind" ] && [ "$next_kind" != "quiz" ] \
+  && ok "на замену сразу пришёл другой тип ($next_kind)" || no "замены другого типа нет: $r"
+echo "$r" | field replacement html | grep -q "data-kind=\"$next_kind\"" \
+  && ok "замена пришла готовой разметкой" || no "в замене нет разметки задания"
 r=$(curl -s -X POST "$BASE/api/captcha/$cid" --data-urlencode "answer=$right")
-echo "$r" | grep -q '"expired":true' && ok "после лимита попыток задание сгорает" || no "лимит попыток не сработал: $r"
+echo "$r" | grep -q '"expired":true' && ok "после одной ошибки задание сгорает" || no "вторая попытка сработала: $r"
+other=$(curl -s "$BASE/api/captcha?previous=$cid" | field kind)
+[ -n "$other" ] && [ "$other" != "quiz" ] && ok "«Другое задание» меняет тип ($other)" \
+  || no "кнопка выдала тот же тип: $other"
 
 PID=$(sql "select id from purpose where needs_comment = false order by sort_order limit 1")
 PID_C=$(sql "select id from purpose where needs_comment = true order by sort_order limit 1")
@@ -101,7 +141,7 @@ join(){ # jar, фамилия имя, группа, [цель], [коммент�
   code -b "$jar" -c "$jar" -X POST "$BASE/join" \
     --data-urlencode "full_name=$name" --data-urlencode "group_name=$grp" \
     --data-urlencode "purpose_id=$purpose" --data-urlencode "comment=$note" \
-    --data-urlencode "captcha_id=$cid"
+    --data-urlencode "captcha_id=$cid" --data-urlencode "session_id=$SID"
 }
 
 echo "== 7. Проверки формы"
@@ -109,7 +149,7 @@ curl -s -b "$U1" "$BASE/join" > "$S"
 cid=$(grep -o 'name="captcha_id" value="[^"]*"' "$S" | cut -d'"' -f4)
 c=$(code -X POST "$BASE/join" --data-urlencode "full_name=Иванов Иван" \
   --data-urlencode "group_name=КТ-24-04" --data-urlencode "purpose_id=$PID" \
-  --data-urlencode "captcha_id=$cid")
+  --data-urlencode "captcha_id=$cid" --data-urlencode "session_id=$SID")
 [ "$c" = 422 ] && ok "без решённой капчи не пускает" || no "капча не обязательна: $c"
 c=$(join "$U3" "Иванов" "КТ-24-04"); [ "$c" = 422 ] && ok "одна фамилия без имени не проходит" || no "имя не проверяется: $c"
 c=$(join "$U3" "Сидоров Пётр" "КТ2404"); [ "$c" = 422 ] && ok "кривая группа не проходит" || no "группа не проверяется: $c"
@@ -231,7 +271,12 @@ curl -s -b "$A" --get --data-urlencode "group=АИ-23-04" "$BASE/admin/entries" 
 n=$(sql "select count(*) from queue_entry where session_id=$SID")
 [ "$n" = 4 ] && ok "все четыре записи на месте" || no "записей в истории: $n"
 
+echo "== 18. Регрессионные проверки"
+"${compose[@]}" exec -T app python -m unittest discover -s /tests -v \
+  && ok "серверные регрессионные проверки" || no "серверные регрессионные проверки"
+node --test "$CD/tests/ui.test.cjs" \
+  && ok "клиентские регрессионные проверки" || no "клиентские регрессионные проверки"
+
 echo
 echo "Итог: $pass ок, $fail провалов"
-rm -f "$A" "$U1" "$U2" "$U3" "$S"
 [ "$fail" = 0 ]

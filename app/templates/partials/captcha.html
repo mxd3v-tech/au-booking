@@ -15,6 +15,9 @@
 
   <h3 class="captcha__title">{{ p.title }}</h3>
   <p class="captcha__intro">{{ p.intro }}</p>
+  <p class="captcha__hint">Одна попытка: при ошибке появится другое задание.</p>
+
+  {% if p.log %}<pre class="captcha__terminal"><code>{{ p.log }}</code></pre>{% endif %}
 
   {% if challenge.kind == 'truth_myth' %}
     <div data-tm-list>
@@ -29,13 +32,41 @@
       {% endfor %}
     </div>
 
-  {% elif challenge.kind == 'quiz' %}
+  {% elif challenge.kind in ['quiz', 'permissions', 'logs'] %}
     <div class="quiz-options">
       {% for option in p.options %}
       <button type="button" class="quiz-option" data-quiz-option data-index="{{ loop.index0 }}">
         <i>{{ loop.index }}</i><span>{{ option }}</span>
       </button>
       {% endfor %}
+    </div>
+
+  {% elif challenge.kind == 'ports' %}
+    <div class="captcha-ports">
+      {% for service in p.services %}
+      <label class="captcha-ports__row">
+        <span>{{ service }}</span>
+        <select data-port-select aria-label="Порт для {{ service }}">
+          <option value="">Выберите порт</option>
+          {% for port in p.ports %}<option value="{{ port }}">{{ port }}</option>{% endfor %}
+        </select>
+      </label>
+      {% endfor %}
+    </div>
+    <button type="button" class="btn btn--primary btn--block" data-ports-check disabled>Проверить порты</button>
+
+  {% elif challenge.kind == 'order_steps' %}
+    <p class="captcha__hint">Нажимайте на этапы по порядку. Цифры покажут ваш выбор.</p>
+    <div class="quiz-options">
+      {% for step in p.steps %}
+      <button type="button" class="quiz-option" data-order-option data-index="{{ loop.index0 }}" aria-pressed="false">
+        <i data-order-number aria-label="Номер шага">·</i><span>{{ step }}</span>
+      </button>
+      {% endfor %}
+    </div>
+    <div class="btn-row captcha__actions">
+      <button type="button" class="btn btn--ghost" data-order-reset>Сбросить порядок</button>
+      <button type="button" class="btn btn--primary" data-order-check disabled>Проверить порядок</button>
     </div>
 
   {% elif challenge.kind == 'net_scheme' %}

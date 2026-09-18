@@ -9,12 +9,13 @@ from sqlalchemy.orm import Session
 from app.captcha import consume_challenge, issue_challenge, verify_challenge
 from app.config import settings
 from app.db import get_db
-from app.models import EntryStatus, Purpose, QueueEntry
+from app.models import CaptchaChallenge, Purpose, QueueEntry
 from app.security import (
     ENTRY_COOKIE,
     ENTRY_COOKIE_MAX_AGE,
     clean_full_name,
     clean_group,
+    clean_text,
     hash_ip,
     name_key,
     new_entry_token,
@@ -65,6 +66,7 @@ def _queue_context(request: Request, db: Session) -> dict:
     mine = _my_entry(request, db, session.id if session else None)
     return {
         "session": session,
+        "session_revision": queue_service.session_revision(session),
         "entries": entries,
         "mine": mine,
         "ahead": queue_service.waiting_before(entries, mine) if mine else 0,
@@ -98,6 +100,7 @@ def queue_fragment(request: Request, db: Session = Depends(get_db)):
         {
             "open": session is not None,
             "session_id": session.id if session else None,
+            "session_revision": context["session_revision"],
             "waiting": context["counters"]["waiting"],
             "ahead": context["ahead"],
             "mine": context["mine"].number if context["mine"] else None,
@@ -152,10 +155,26 @@ def join_submit(
     purpose_id: str = Form(""),
     comment: str = Form(""),
     captcha_id: str = Form(""),
+    session_id: str = Form(""),
 ):
     session = queue_service.current_session(db)
     if session is None:
         return RedirectResponse("/", status_code=303)
+
+    if session_id != str(session.id):
+        return _join_form(
+            request,
+            db,
+            session,
+            errors={"queue": "Приём изменился. Проверьте его параметры и отправьте новую форму."},
+            values={
+                "full_name": clean_full_name(full_name),
+                "group_name": clean_group(group_name),
+                "purpose_id": purpose_id,
+                "comment": clean_text(comment).strip()[:200],
+            },
+            status_code=409,
+        )
 
     # Записаться можно один раз за приём — неважно, ждёт человек или его уже
     # приняли. Форму с этого телефона показывать больше нечего.
@@ -164,7 +183,7 @@ def join_submit(
 
     name = clean_full_name(full_name)
     group = clean_group(group_name)
-    comment = (comment or "").strip()[:200]
+    comment = clean_text(comment).strip()[:200]
     purposes = _active_purposes(db)
 
     errors: dict[str, str] = {}
@@ -224,27 +243,36 @@ def join_submit(
 
 @router.post("/leave")
 def leave_queue(request: Request, db: Session = Depends(get_db)):
-    entry = queue_service.entry_by_token(db, read_entry_token(request))
-    if entry is not None and entry.is_waiting:
-        queue_service.set_status(db, entry, EntryStatus.left)
+    queue_service.leave_queue(db, read_entry_token(request))
     return RedirectResponse("/", status_code=303)
 
 
 # ── Капча ───────────────────────────────────────────────────────────────
 
-@router.get("/api/captcha")
-def captcha_new(request: Request, db: Session = Depends(get_db)):
-    challenge = issue_challenge(db)
+def _captcha_data(request: Request, challenge: CaptchaChallenge) -> dict:
     html = templates.get_template("partials/captcha.html").render(
         {"request": request, "challenge": challenge}
     )
-    return JSONResponse({"id": challenge.id, "kind": challenge.kind, "html": html})
+    return {"id": challenge.id, "kind": challenge.kind, "html": html}
+
+
+@router.get("/api/captcha")
+def captcha_new(request: Request, previous: str = "", db: Session = Depends(get_db)):
+    old = db.get(CaptchaChallenge, previous) if previous else None
+    challenge = issue_challenge(db, exclude_kind=old.kind if old else None)
+    return JSONResponse(_captcha_data(request, challenge))
 
 
 @router.post("/api/captcha/{challenge_id}")
 def captcha_check(
     challenge_id: str,
+    request: Request,
     db: Session = Depends(get_db),
     answer: str = Form(""),
 ):
-    return JSONResponse(verify_challenge(db, challenge_id, answer))
+    result = verify_challenge(db, challenge_id, answer)
+    if not result["ok"]:
+        old = db.get(CaptchaChallenge, challenge_id)
+        replacement = issue_challenge(db, exclude_kind=old.kind if old else None)
+        result["replacement"] = _captcha_data(request, replacement)
+    return JSONResponse(result)

@@ -21,6 +21,7 @@ from app.security import (
     check_admin_credentials,
     clean_full_name,
     clean_group,
+    clean_text,
     make_admin_token,
     name_key,
     new_entry_token,
@@ -227,7 +228,10 @@ def session_close(db: Session = Depends(get_db)):
         return _back("/admin", err="Приём и так закрыт.")
 
     session_id = session.id
-    left = queue_service.close_session(db, session)
+    try:
+        left = queue_service.close_session(db, session)
+    except queue_service.QueueError as exc:
+        return _back("/admin", err=str(exc))
     message = "Приём закрыт, список ушёл в историю."
     if left:
         message += f" Не дождались: {left}."
@@ -268,7 +272,7 @@ def entry_add(
             full_name_key=name_key(name),
             group_name=group,
             purpose_id=purpose.id if purpose else None,
-            comment=(comment or "").strip()[:200],
+            comment=clean_text(comment).strip()[:200],
             token=new_entry_token(),
             added_by_admin=True,
             allow_namesake=namesake == "on",

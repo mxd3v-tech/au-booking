@@ -54,7 +54,7 @@
 
   document.addEventListener('input', function (event) {
     var input = event.target.closest('[data-group-input]');
-    if (!input) return;
+    if (!input || input.getAttribute('data-group-input') !== 'aa-00-00') return;
     var atEnd = input.selectionStart === input.value.length;
     var formatted = formatGroup(input.value);
     if (formatted !== input.value) {
@@ -67,6 +67,8 @@
   var slot = document.querySelector('[data-captcha-slot]');
   var submitButton = document.querySelector('[data-join-submit]');
   var hiddenInput = document.querySelector('[data-captcha-input]');
+  // Сколько разбор ошибки висит на экране, прежде чем придёт другое задание.
+  var WRONG_PAUSE = 2600;
 
   function setSubmitReady(ready) {
     if (!submitButton) return;
@@ -90,28 +92,62 @@
     feedback.appendChild(text);
   }
 
-  function lock(box) {
-    box.classList.add('is-solved');
-    var controls = box.querySelectorAll('button:not([data-captcha-reload]), input[type=range]');
+  // Сгоревшее задание больше не отвечает, поэтому гасим его управление.
+  function freeze(box) {
+    var controls = box.querySelectorAll(
+      'button:not([data-captcha-reload]), input[type=range], select'
+    );
     for (var i = 0; i < controls.length; i++) controls[i].disabled = true;
   }
 
-  function reload() {
-    if (!slot) return;
+  function lock(box) {
+    box.classList.add('is-solved');
+    freeze(box);
+  }
+
+  function showFailure(box) {
+    box.innerHTML =
+      '<div class="callout callout--err"><div class="callout__title">' +
+      'Задание не загрузилось</div><p style="margin:0;font-size:var(--text-14)">' +
+      'Обновите страницу — похоже, связь с сервером моргнула.</p></div>';
+  }
+
+  // В предпросмотре админки подсвечиваем тип, который сейчас на экране.
+  function markPreviewKind(kind) {
+    var links = document.querySelectorAll('[data-captcha-kind]');
+    for (var i = 0; i < links.length; i++) {
+      var active = links[i].getAttribute('data-captcha-kind') === kind;
+      links[i].classList.toggle('btn--primary', active);
+      links[i].classList.toggle('btn--ghost', !active);
+    }
+  }
+
+  // Ставим на место уже готовое задание: сервер присылает его вместе с разбором
+  // ошибки, так что второй запрос не нужен.
+  function swap(data) {
+    if (!slot || !data || !data.html) return;
     setSubmitReady(false);
-    fetch('/api/captcha', { headers: { 'Accept': 'application/json' } })
+    slot.innerHTML = data.html;
+    if (hiddenInput) hiddenInput.value = data.id;
+    if (slot.hasAttribute('data-captcha-preview')) markPreviewKind(data.kind);
+    bind(slot.querySelector('[data-captcha]'));
+  }
+
+  // previous — задание, которое студент только что видел: сервер подберёт
+  // замену другого типа.
+  function reload(previous) {
+    if (!slot) return;
+    // В предпросмотре сохраняем выбранный ?kind и обновляем всю страницу.
+    if (slot.hasAttribute('data-captcha-preview')) {
+      window.location.reload();
+      return;
+    }
+    setSubmitReady(false);
+    fetch('/api/captcha' + (previous ? '?previous=' + encodeURIComponent(previous) : ''),
+      { headers: { 'Accept': 'application/json' } })
       .then(function (response) { return response.json(); })
-      .then(function (data) {
-        slot.innerHTML = data.html;
-        if (hiddenInput) hiddenInput.value = data.id;
-        bind(slot.querySelector('[data-captcha]'));
-      })
-      .catch(function () {
-        slot.innerHTML =
-          '<div class="callout callout--err"><div class="callout__title">' +
-          'Задание не загрузилось</div><p style="margin:0;font-size:var(--text-14)">' +
-          'Обновите страницу — похоже, связь с сервером моргнула.</p></div>';
-      });
+      .then(swap)
+      .catch(function () { showFailure(slot); });
   }
 
   function send(box, answer) {
@@ -132,7 +168,12 @@
           if (hiddenInput) hiddenInput.value = id;
           setSubmitReady(true);
         } else if (result.expired) {
-          setTimeout(function () { reload(); }, 2600);
+          // Одна попытка: задание сгорело, дальше — другой тип.
+          freeze(box);
+          setTimeout(function () {
+            if (result.replacement) swap(result.replacement);
+            else reload(id);
+          }, WRONG_PAUSE);
         }
         return result;
       })
@@ -147,8 +188,8 @@
 
   // Правда или миф: отвечаем на все карточки, проверка уходит сама
   function bindTruthMyth(box) {
+    if (!box.querySelector('[data-tm-card]')) return;
     var cards = box.querySelectorAll('[data-tm-card]');
-    if (!cards.length) return;
     var answers = new Array(cards.length).fill(null);
 
     box.addEventListener('click', function (event) {
@@ -166,7 +207,9 @@
     });
   }
 
+  // Один список вариантов: квиз, права доступа и разбор журнала
   function bindQuiz(box) {
+    if (!box.querySelector('[data-quiz-option]')) return;
     box.addEventListener('click', function (event) {
       var option = event.target.closest('[data-quiz-option]');
       if (!option || option.disabled) return;
@@ -178,6 +221,7 @@
   }
 
   function bindScheme(box) {
+    if (!box.querySelector('[data-scheme-node]')) return;
     box.addEventListener('click', function (event) {
       var node = event.target.closest('[data-scheme-node]');
       if (!node || node.disabled) return;
@@ -186,6 +230,73 @@
       node.classList.add('is-on');
       send(box, node.getAttribute('data-node'));
     });
+  }
+
+  // Сервис ищет порт: ответ уходит, когда выбраны все порты
+  function bindPorts(box) {
+    var check = box.querySelector('[data-ports-check]');
+    if (!check) return;
+    var selects = box.querySelectorAll('[data-port-select]');
+
+    function chosen() {
+      var values = [];
+      for (var i = 0; i < selects.length; i++) {
+        if (!selects[i].value) return null;
+        values.push(selects[i].value);
+      }
+      return values;
+    }
+
+    function render() { check.disabled = chosen() === null; }
+
+    box.addEventListener('change', function (event) {
+      if (event.target.closest('[data-port-select]')) render();
+    });
+    check.addEventListener('click', function () {
+      var values = chosen();
+      if (values) send(box, values.join(','));
+    });
+    render();
+  }
+
+  // Что за чем: порядок задаётся тапами, цифра показывает номер шага
+  function bindOrder(box) {
+    var check = box.querySelector('[data-order-check]');
+    if (!check) return;
+    var options = box.querySelectorAll('[data-order-option]');
+    var picked = [];
+
+    function render() {
+      for (var i = 0; i < options.length; i++) {
+        var option = options[i];
+        var place = picked.indexOf(option.getAttribute('data-index'));
+        var number = option.querySelector('[data-order-number]');
+        if (number) number.textContent = place === -1 ? '·' : String(place + 1);
+        option.classList.toggle('is-on', place !== -1);
+        option.setAttribute('aria-pressed', place === -1 ? 'false' : 'true');
+      }
+      check.disabled = picked.length !== options.length;
+    }
+
+    box.addEventListener('click', function (event) {
+      var option = event.target.closest('[data-order-option]');
+      if (!option || option.disabled) return;
+      var index = option.getAttribute('data-index');
+      var place = picked.indexOf(index);
+      // Повторный тап снимает шаг вместе со всеми, что шли после него.
+      if (place === -1) picked.push(index);
+      else picked = picked.slice(0, place);
+      render();
+    });
+
+    var resetButton = box.querySelector('[data-order-reset]');
+    if (resetButton) {
+      resetButton.addEventListener('click', function () { picked = []; render(); });
+    }
+    check.addEventListener('click', function () {
+      if (picked.length === options.length) send(box, picked.join(','));
+    });
+    render();
   }
 
   function maskFor(prefix) {
@@ -232,25 +343,25 @@
     }
   }
 
+  // Тип задания знает сервер, а браузеру достаточно разметки: каждый
+  // обработчик молча уходит, если его элементов в задании нет.
+  var BINDERS = [bindTruthMyth, bindQuiz, bindScheme, bindSubnet, bindPorts, bindOrder];
+
   function bind(box) {
     if (!box) return;
     setSubmitReady(false);
 
     var reloadButton = box.querySelector('[data-captcha-reload]');
-    if (reloadButton) reloadButton.addEventListener('click', function () { reload(); });
+    if (reloadButton) {
+      reloadButton.addEventListener('click', function () {
+        reload(box.getAttribute('data-id'));
+      });
+    }
 
-    var kind = box.getAttribute('data-kind');
-    if (kind === 'truth_myth') bindTruthMyth(box);
-    else if (kind === 'quiz') bindQuiz(box);
-    else if (kind === 'net_scheme') bindScheme(box);
-    else if (kind === 'subnet') bindSubnet(box);
+    for (var i = 0; i < BINDERS.length; i++) BINDERS[i](box);
   }
 
   if (slot) bind(slot.querySelector('[data-captcha]'));
-
-  // Просмотр капчи в админке — тот же движок, без формы записи
-  var preview = document.querySelector('[data-captcha-preview] [data-captcha]');
-  if (preview) bind(preview);
 
   // ── Живая очередь сама подтягивает свежий список ──────────────────────
   function people(count) {
@@ -262,11 +373,13 @@
   }
 
   var queueBox = document.querySelector('[data-queue-list]');
-  if (queueBox) {
-    var statusBar = document.querySelector('[data-queue-status]');
-    var wasOpen = !!statusBar && statusBar.classList.contains('status-bar--open');
-    var myStatus = queueBox.getAttribute('data-mine-status') || '';
-    var every = Math.max(parseInt(queueBox.getAttribute('data-poll'), 10) || 15, 5) * 1000;
+  var statusBar = document.querySelector('[data-queue-status]');
+  if (statusBar) {
+    var wasOpen = statusBar.classList.contains('status-bar--open');
+    var sessionId = statusBar.getAttribute('data-session-id') || '';
+    var sessionRevision = statusBar.getAttribute('data-session-revision') || '';
+    var myStatus = statusBar.getAttribute('data-mine-status') || '';
+    var every = Math.max(parseInt(statusBar.getAttribute('data-poll'), 10) || 15, 5) * 1000;
 
     function refreshQueue() {
       // В фоне телефон всё равно ничего не показывает — не тратим батарею.
@@ -275,14 +388,16 @@
       fetch('/api/queue', { headers: { 'Accept': 'application/json' } })
         .then(function (response) { return response.json(); })
         .then(function (data) {
-          // Приём открыли или закрыли, либо мою запись отметили в админке —
-          // меняется вся страница, а не один список.
-          if (data.open !== wasOpen || (data.mine_status || '') !== myStatus) {
+          // Замечаем открытие даже без списка, смену приёма между опросами,
+          // правку кабинета/времени/заметки и изменение своей записи.
+          if (data.open !== wasOpen || String(data.session_id || '') !== sessionId ||
+              (data.session_revision || '') !== sessionRevision ||
+              (data.mine_status || '') !== myStatus) {
             window.location.reload();
             return;
           }
 
-          queueBox.innerHTML = data.html;
+          if (queueBox) queueBox.innerHTML = data.html;
 
           var badge = document.querySelector('[data-waiting-badge]');
           if (badge) badge.textContent = 'ждут: ' + data.waiting;

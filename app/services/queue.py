@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -70,6 +72,28 @@ def current_session(db: Session) -> QueueSession | None:
     return db.scalar(select(QueueSession).where(QueueSession.closed_at.is_(None)))
 
 
+def _lock_open_session(db: Session, session_id: int) -> QueueSession:
+    """Общий замок для записи, выхода и закрытия приёма до конца транзакции."""
+    session = db.scalar(
+        select(QueueSession)
+        .where(QueueSession.id == session_id, QueueSession.closed_at.is_(None))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if session is None:
+        db.rollback()
+        raise QueueError("Этот приём уже закрыт. Вернитесь на страницу очереди.")
+    return session
+
+
+def session_revision(session: QueueSession | None) -> str:
+    """Версия публичной шапки: меняется и при новом приёме, и при правке полей."""
+    if session is None:
+        return ""
+    data = json.dumps([session.id, session.room, session.time_label, session.note])
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
+
+
 def open_session(
     db: Session,
     *,
@@ -98,7 +122,12 @@ def open_session(
 
 def close_session(db: Session, session: QueueSession) -> int:
     """Закрыть приём. Возвращает, сколько человек так и не дождалось."""
-    left_waiting = sum(1 for e in session.entries if e.is_waiting)
+    session = _lock_open_session(db, session.id)
+    left_waiting = db.scalar(
+        select(func.count(QueueEntry.id)).where(
+            QueueEntry.session_id == session.id, QueueEntry.status == EntryStatus.waiting
+        )
+    ) or 0
     session.closed_at = utc_now()
     db.commit()
     return left_waiting
@@ -192,28 +221,30 @@ def join_queue(
 
     Не пустить запись могут два ограничения базы, и ведём мы себя по-разному:
 
-      * `uq_entry_number` — двое нажали кнопку в одну и ту же секунду и
-        претендуют на один номер. Берём следующий и пробуем снова; отсюда
-        цикл, а не одна попытка.
+      * `uq_entry_number` — страховка от записи в обход блокировки сеанса.
       * `uq_entry_person` — этот человек в приёме уже есть. Студенту отказ,
         а подтверждённому в админке однофамильцу дописываем к ключу группу.
     """
     last_error: IntegrityError | None = None
+    session_id = session.id
     key = full_name_key
     namesakes = 0
 
     for _ in range(8):
+        # После rollback блокировка потеряна: на каждой попытке берём её
+        # заново и читаем актуальный closed_at, а не объект из identity map.
+        _lock_open_session(db, session_id)
         number = (
             db.scalar(
                 select(func.max(QueueEntry.number)).where(
-                    QueueEntry.session_id == session.id
+                    QueueEntry.session_id == session_id
                 )
             )
             or 0
         ) + 1
 
         entry = QueueEntry(
-            session_id=session.id,
+            session_id=session_id,
             number=number,
             full_name=full_name,
             full_name_key=key,
@@ -232,7 +263,7 @@ def join_queue(
             if _violates(exc, "uq_entry_person"):
                 if not allow_namesake:
                     raise QueueError(
-                        _already_joined_message(db, session.id, key, full_name)
+                        _already_joined_message(db, session_id, key, full_name)
                     ) from exc
                 namesakes += 1
                 key = _namesake_key(full_name_key, group_name, namesakes)
@@ -264,6 +295,26 @@ def set_status(db: Session, entry: QueueEntry, status: EntryStatus) -> None:
     entry.status = status
     entry.closed_at = None if status is EntryStatus.waiting else utc_now()
     db.commit()
+
+
+def leave_queue(db: Session, token: str) -> bool:
+    """Студент может выйти только из открытого приёма и только пока ожидает."""
+    entry = entry_by_token(db, token)
+    if entry is None:
+        return False
+    try:
+        _lock_open_session(db, entry.session_id)
+    except QueueError:
+        return False
+    # Преподаватель мог уже отметить запись; не затираем его отметку.
+    changed = db.scalar(
+        update(QueueEntry)
+        .where(QueueEntry.id == entry.id, QueueEntry.status == EntryStatus.waiting)
+        .values(status=EntryStatus.left, closed_at=utc_now())
+        .returning(QueueEntry.id)
+    )
+    db.commit()
+    return changed is not None
 
 
 def known_groups(db: Session, limit: int = 60) -> list[str]:

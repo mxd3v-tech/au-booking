@@ -286,6 +286,13 @@ img,svg{max-width:100%}
 .captcha__feedback.is-bad{display:block;background:var(--danger-soft);color:var(--danger);border:1px solid var(--danger)}
 .captcha__feedback strong{display:block;font-size:var(--text-16);margin-bottom:2px}
 .captcha.is-solved{border-color:var(--brand);background:var(--brand-soft)}
+.captcha__hint{font-size:var(--text-14);color:var(--muted);margin:0 0 var(--space-3)}
+.captcha__terminal{max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);padding:var(--space-4);font-family:var(--font-mono);font-size:var(--text-14);color:var(--ink-strong);margin:0 0 var(--space-4)}
+.captcha__actions{margin-top:var(--space-3)}
+.captcha-ports{display:grid;gap:var(--space-3);margin-bottom:var(--space-4)}
+.captcha-ports__row{display:grid;grid-template-columns:minmax(0,1fr) minmax(140px,1fr);align-items:center;gap:var(--space-3);font-weight:600}
+.captcha-ports select{min-height:52px;min-width:0;width:100%;padding:var(--space-2);border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--surface);color:var(--ink);font:inherit}
+@media (max-width:400px){.captcha-ports__row{grid-template-columns:1fr}}
 
 /* правда/миф */
 .tm-card{background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);padding:var(--space-4);margin-bottom:var(--space-3)}

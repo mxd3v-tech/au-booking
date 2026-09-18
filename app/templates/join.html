@@ -36,6 +36,7 @@
 </noscript>
 
 <form method="post" action="/join" novalidate>
+  <input type="hidden" name="session_id" value="{{ session.id }}">
   <input type="hidden" name="captcha_id" value="{{ challenge.id }}" data-captcha-input>
 
   <div class="field">
@@ -56,14 +57,15 @@
     <input class="input input--mono {% if errors.group_name %}is-error{% endif %}" type="text"
            id="group_name" name="group_name" value="{{ values.group_name or '' }}"
            placeholder="{{ group_placeholder }}" list="groups-list" required
-           maxlength="32" autocomplete="off" spellcheck="false" data-group-input>
+           maxlength="32" autocomplete="off" spellcheck="false"
+           data-group-input="{{ settings.group_input_mask }}">
     <datalist id="groups-list">
       {% for group in groups %}<option value="{{ group }}"></option>{% endfor %}
     </datalist>
     {% if errors.group_name %}
       <div class="field__error">{{ errors.group_name }}</div>
     {% else %}
-      <div class="field__hint">Формат: две буквы, год, номер — например {{ group_placeholder }}</div>
+      <div class="field__hint">Формат номера группы: {{ group_placeholder }}</div>
     {% endif %}
   </div>
 

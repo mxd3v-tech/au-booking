@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+DEFAULT_GROUP_PATTERN = r"^[А-ЯЁ]{2}-[0-9]{2}-[0-9]{2}$"
+
 
 def _int(name: str, default: int) -> int:
     try:
@@ -49,10 +51,15 @@ class Settings:
     poll_seconds: int = _int("POLL_SECONDS", 15)
 
     captcha_ttl_seconds: int = _int("CAPTCHA_TTL_SECONDS", 600)
-    captcha_max_attempts: int = _int("CAPTCHA_MAX_ATTEMPTS", 4)
 
-    group_pattern: str = os.getenv("GROUP_PATTERN", r"^[А-ЯЁ]{2}-[0-9]{2}-[0-9]{2}$")
+    group_pattern: str = os.getenv("GROUP_PATTERN", DEFAULT_GROUP_PATTERN)
     group_placeholder: str = os.getenv("GROUP_PLACEHOLDER", "КТ-24-04")
+
+    @property
+    def group_input_mask(self) -> str:
+        # Произвольный regex нельзя безопасно превратить в маску ввода.
+        # Для своего формата оставляем свободный ввод и серверную проверку.
+        return "aa-00-00" if self.group_pattern == DEFAULT_GROUP_PATTERN else ""
 
     @property
     def tz(self) -> ZoneInfo:

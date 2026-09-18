@@ -114,7 +114,8 @@
         <div class="field">
           <label class="field__label" for="m_group">Группа</label>
           <input class="input input--mono" type="text" id="m_group" name="group_name" required
-                 maxlength="32" placeholder="{{ group_placeholder }}" data-group-input>
+                  maxlength="32" placeholder="{{ group_placeholder }}"
+                  data-group-input="{{ settings.group_input_mask }}">
         </div>
         {% if purposes %}
         <div class="field">

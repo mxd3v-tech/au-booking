@@ -9,6 +9,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from app.models import EntryStatus, QueueEntry
+from app.security import clean_text
 from app.services.queue import to_local
 
 HEADERS = ["№", "Фамилия и имя", "Группа", "Цель визита", "Комментарий", "Статус", "Встал в очередь"]
@@ -34,11 +35,27 @@ def _rows(entries: list[QueueEntry]) -> list[list[str]]:
 def to_csv(entries: list[QueueEntry], title: str) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow([title])
+    writer.writerow([_csv_text(title)])
     writer.writerow(HEADERS)
-    writer.writerows(_rows(entries))
+    writer.writerows([_csv_text(value) for value in row] for row in _rows(entries))
     # BOM — чтобы Excel не превратил кириллицу в кракозябры
     return "﻿".encode("utf-8") + buffer.getvalue().encode("utf-8")
+
+
+def _csv_text(value: str) -> str:
+    value = clean_text(value)
+    # Кавычки CSV экранируют разделитель, но не запрещают Excel вычислять
+    # формулу. Учитываем и пробелы/переводы строк перед знаком формулы.
+    if value.lstrip().startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")):
+        return "'" + value
+    return value
+
+
+def _set_text(cell, value: str) -> None:
+    cell.value = clean_text(value)
+    # openpyxl сам распознаёт '=...' как формулу и '#N/A' как ошибку;
+    # все поля выгрузки — текст, в том числе из старых записей.
+    cell.data_type = "s"
 
 
 def to_xlsx(entries: list[QueueEntry], title: str) -> bytes:
@@ -46,7 +63,7 @@ def to_xlsx(entries: list[QueueEntry], title: str) -> bytes:
     sheet = workbook.active
     sheet.title = "Очередь"
 
-    sheet["A1"] = title
+    _set_text(sheet["A1"], title)
     sheet["A1"].font = Font(bold=True, size=13, color=BRAND)
     sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(HEADERS))
 
@@ -63,7 +80,8 @@ def to_xlsx(entries: list[QueueEntry], title: str) -> bytes:
 
     for row_index, row in enumerate(_rows(entries), start=4):
         for column, value in enumerate(row, start=1):
-            cell = sheet.cell(row=row_index, column=column, value=value)
+            cell = sheet.cell(row=row_index, column=column)
+            _set_text(cell, value)
             cell.border = border
             cell.alignment = Alignment(vertical="center", wrap_text=column in (4, 5))
 

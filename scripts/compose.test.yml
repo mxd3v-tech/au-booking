@@ -1,0 +1,41 @@
+# Самостоятельный стек для smoke.sh: своя сеть, БД в памяти и случайный порт.
+# Пути считаются от корня проекта (--project-directory в smoke.sh).
+services:
+  db:
+    image: ${TEST_POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_DB: au_queue_test
+      POSTGRES_USER: au_queue
+      POSTGRES_PASSWORD: test-only-password
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U au_queue -d au_queue_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build:
+      context: ./app
+      args:
+        PYTHON_IMAGE: ${TEST_PYTHON_IMAGE:-python:3.12-slim}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://au_queue:test-only-password@db:5432/au_queue_test
+      SECRET_KEY: test-only-secret-key
+      ADMIN_USERNAME: smoke-admin
+      ADMIN_PASSWORD: smoke-password
+      COOKIE_SECURE: "0"
+      TZ: Europe/Moscow
+    ports:
+      - "127.0.0.1::8000"
+    volumes:
+      - ./tests:/tests:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

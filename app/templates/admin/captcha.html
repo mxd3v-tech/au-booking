@@ -6,7 +6,7 @@
 <p class="muted" style="max-width:70ch">
   Перед формой записи студент решает одно короткое задание по сетевому и системному
   администрированию. Ответ проверяется на сервере, а разбор ошибки показывается сразу —
-  так проверка заодно чему-то учит. Тип задания выбирается случайно.
+  так проверка заодно чему-то учит. После ошибки сразу появляется задание другого типа.
 </p>
 
 <div class="btn-row" style="margin:var(--space-5) 0">
@@ -14,16 +14,20 @@
     'truth_myth': 'Правда или миф',
     'quiz': 'Один верный ответ',
     'net_scheme': 'Где искать причину',
-    'subnet': 'Выберите маску'
+    'subnet': 'Выберите маску',
+    'ports': 'Сервис ищет порт',
+    'order_steps': 'Что за чем',
+    'permissions': 'Права без 777',
+    'logs': 'Читаем журнал'
   } %}
   {% for kind in kinds %}
   <a class="btn {{ 'btn--primary' if kind == current_kind else 'btn--ghost' }}"
-     href="/admin/captcha?kind={{ kind }}">{{ names[kind] }}</a>
+     href="/admin/captcha?kind={{ kind }}" data-captcha-kind="{{ kind }}">{{ names[kind] }}</a>
   {% endfor %}
   <a class="btn btn--ghost" href="/admin/captcha">Случайное</a>
 </div>
 
-<div style="max-width:640px" data-captcha-preview>
+<div style="max-width:640px" data-captcha-preview data-captcha-slot>
   {% include "partials/captcha.html" %}
 </div>
 
@@ -31,8 +35,9 @@
   <div class="callout__title">Как пополнить банк вопросов</div>
   <p style="margin:0;font-size:var(--text-14)">
     Все формулировки лежат в файле <code>app/captcha/bank.py</code>: списки
-    <code>TRUTH_MYTH</code>, <code>QUIZ</code>, <code>SCHEME_CASES</code> и
-    <code>SUBNET_CASES</code>. Добавили строку — перезапустили контейнер
+    <code>TRUTH_MYTH</code>, <code>QUIZ</code>, <code>SCHEME_CASES</code>,
+    <code>SUBNET_CASES</code>, <code>PORT_SERVICES</code>, <code>ORDER_CASES</code>,
+    <code>PERMISSION_CASES</code> и <code>LOG_CASES</code>. Добавили строку — перезапустили контейнер
     <code>app</code>, и вопрос уже в ротации.
   </p>
 </div>

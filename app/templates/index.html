@@ -17,7 +17,11 @@
 
 {% block content %}
 
-<div class="status-bar{% if session %} status-bar--open{% endif %}" data-queue-status>
+<div class="status-bar{% if session %} status-bar--open{% endif %}" data-queue-status
+     data-session-id="{{ session.id if session else '' }}"
+     data-session-revision="{{ session_revision }}"
+     data-mine-status="{{ mine.status.value if mine else '' }}"
+     data-poll="{{ settings.poll_seconds }}">
   <span class="status-bar__dot" aria-hidden="true"></span>
   {% if session %}
   <span class="status-bar__text">Приём идёт</span>
@@ -28,7 +32,7 @@
   </span>
   {% else %}
   <span class="status-bar__text">Сейчас приёма нет</span>
-  <span class="status-bar__meta">Отсканируйте код ещё раз, когда приём откроется</span>
+  <span class="status-bar__meta">Страница обновится, когда приём откроется</span>
   {% endif %}
 </div>
 
@@ -53,7 +57,7 @@
   </div>
   <div class="btn-row" style="margin-top:var(--space-4)">
     <form method="post" action="/leave" class="inline-form"
-          data-confirm="Выйти из очереди? Место освободится, а вернуться можно будет только в конец списка.">
+          data-confirm="Выйти из очереди? Вернуть вас в этот приём сможет только преподаватель.">
       <button type="submit" class="btn btn--ghost">Выйти из очереди</button>
     </form>
   </div>
@@ -64,20 +68,19 @@
   {% if mine.status.value == 'done' %}
   <div class="callout callout--ok">
     <div class="callout__title">Вы были под номером {{ mine.number }} — приём состоялся</div>
-    <p style="margin:0;font-size:var(--text-14)">Вопрос закрыт. Понадобится ещё раз — встаньте в очередь заново.</p>
+    <p style="margin:0;font-size:var(--text-14)">Вопрос закрыт. Если в этот приём нужно подойти ещё раз, обратитесь к преподавателю.</p>
   </div>
   {% elif mine.status.value == 'no_show' %}
   <div class="callout callout--warn">
     <div class="callout__title">Номер {{ mine.number }} не подошёл</div>
-    <p style="margin:0;font-size:var(--text-14)">Когда дошла очередь, вас не нашли. Можно встать заново — уже в конец.</p>
+    <p style="margin:0;font-size:var(--text-14)">Когда дошла очередь, вас не нашли. Попросите преподавателя вернуть вас в очередь.</p>
   </div>
   {% else %}
   <div class="callout">
     <div class="callout__title">Вы вышли из очереди</div>
-    <p style="margin:0;font-size:var(--text-14)">Место освободилось. Передумали — вставайте заново.</p>
+    <p style="margin:0;font-size:var(--text-14)">Место освободилось. Если передумали, вернуть вас в этот приём сможет только преподаватель.</p>
   </div>
   {% endif %}
-  <a class="btn btn--primary btn--lg btn--block" href="/join">Встать в очередь снова</a>
 </section>
 
 {% else %}
@@ -92,8 +95,7 @@
     Очередь
     <span class="badge badge--free" data-waiting-badge>ждут: {{ counters.waiting }}</span>
   </h2>
-  <div data-queue-list data-poll="{{ settings.poll_seconds }}"
-       data-mine-status="{{ mine.status.value if mine else '' }}">
+  <div data-queue-list>
     {% include "partials/queue_list.html" %}
   </div>
   <p class="field__hint" style="margin-top:var(--space-4)">

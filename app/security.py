@@ -24,6 +24,9 @@ _SPACES = re.compile(r"\s+")
 _NAME_ALLOWED = re.compile(r"^[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\-' ]{2,159}$")
 _NAME_PARTS = re.compile(r"[-'\s]+")
 _GROUP_RE = re.compile(settings.group_pattern)
+# XML 1.0: эти символы нельзя записывать в ячейки XLSX. Переводы строк
+# и табуляцию сохраняем — они допустимы в комментариях и таблицах.
+_INVALID_TEXT = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 
 
 # ── Администратор ───────────────────────────────────────────────────────
@@ -102,6 +105,10 @@ def hash_ip(request: Request) -> str:
 
 
 # ── Нормализация и проверка ввода ───────────────────────────────────────
+
+def clean_text(raw: str) -> str:
+    return _INVALID_TEXT.sub("", raw or "")
+
 
 def clean_full_name(raw: str) -> str:
     name = _SPACES.sub(" ", (raw or "").strip())
